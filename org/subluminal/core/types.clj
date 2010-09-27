@@ -252,3 +252,16 @@
                (doseq [ch obj] (bin/write-binary ::card8 buf (int ch))))
   ([_ buf obj len]
     (doseq [ch obj] (bin/write-binary ::card8 buf (int ch)))))
+
+(defmethod bin/write-binary ::string16
+  ;; XXX
+  ([_ buf obj] (bin/write-binary ::string16 buf obj 0))
+  ([_ buf obj n]
+   (doseq [ch obj] (bin/write-binary ::card16 buf (int ch)))))
+
+(defmethod  bin/read-binary ::string16
+  ([_ buf obj n]
+     (apply str
+       (repeatedly n
+         (fn []
+           (char (bin/read-binary ::card16 buf)))))))

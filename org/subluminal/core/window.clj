@@ -187,3 +187,17 @@
     [:num-children ::card16 {:aux 0}]
     (skip 14)
     [:children ::window {:times num-children}]))
+
+(define-core-op
+  (::translate-coordinates 4
+    (skip 1)
+    [:src-window ::window]
+    [:dst-window ::window]
+    [:src-x ::bin/int16]
+    [:src-y ::bin/int16])
+  (::translate-coordinates-reply
+    [:same-screen ::card8]
+    [:child ::window]
+    [:dst-x ::bin/int16]
+    [:dst-y ::bin/int16]
+    (skip 16)))

@@ -20,3 +20,4 @@
 (load "core/atoms")
 (load "core/grab")
 (load "core/pointer")
+(load "core/keys")

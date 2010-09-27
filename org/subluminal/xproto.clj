@@ -1,0 +1,21 @@
+(ns org.subluminal.xproto
+  (:refer-clojure)
+  (:import (java.nio ByteBuffer ByteOrder)
+	   (java.nio.channels SocketChannel)
+	   (java.net InetSocketAddress)
+	   (clojure.lang PersistentQueue))
+  (:require (org.subluminal [binfmt :as bin])))
+
+(declare *display*)
+
+;; Core protocol
+(load "core/types")
+(load "core/events")
+(load "core/display")
+(load "core/socket")
+(load "core/request")
+
+;; Core protocol requests categorized
+(load "core/window")
+(load "core/atoms")
+(load "core/grab.clj")

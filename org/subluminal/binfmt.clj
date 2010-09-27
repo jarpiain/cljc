@@ -5,9 +5,9 @@
 ; skip if cond case do select
 
 ;(use ['clojure.contrib.macro-utils :only '(symbol-macrolet)])
-;(import 'java.io.FileInputStream
-;        'java.nio.channels.FileChannel
-;        'java.nio.channels.FileChannel$MapMode)
+(import 'java.io.FileInputStream
+        'java.nio.channels.FileChannel
+        'java.nio.channels.FileChannel$MapMode)
 
 (defn buffer-wrap
   "Allocates a ByteBuffer wrapping a seq of (unsigned) bytes"
@@ -33,7 +33,6 @@
   binary format"
   (fn [tag & _] tag))
 
-(comment
 (defn parse-file [tag filename & more]
   (let [file (FileInputStream. (str filename))
         chan (.getChannel file)
@@ -41,7 +40,7 @@
         buf (.map chan FileChannel$MapMode/READ_ONLY 0 siz)]
     (try
       (apply read-binary tag buf more)
-      (finally (.close file))))))
+      (finally (.close file)))))
 
 (defn invert-map [m]
   (zipmap (vals m) (keys m)))
@@ -223,7 +222,9 @@
         iter-form (cond
                     ;; make sure to force the read ops
                     (:times opt)
-                    `(vec (repeatedly ~(:times opt) (fn [] ~check-form)))
+                    `(persistent!
+                       (reduce conj! (transient [])
+                               (repeatedly ~(:times opt) (fn [] ~check-form))))
                     (:until opt)
                     `(let [sentinel# ~(:until opt)]
                        (vec (take-while #(not= % sentinel#)

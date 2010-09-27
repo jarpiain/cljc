@@ -18,4 +18,4 @@
 ;; Core protocol requests categorized
 (load "core/window")
 (load "core/atoms")
-(load "core/grab.clj")
+(load "core/grab")

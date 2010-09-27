@@ -93,7 +93,8 @@
   (internal ::card16 {:bitmask {:shift 0 :lock 1 :control 2
                                 :mod1 3 :mod2 4 :mod3 5 :mod4 6 :mod5 7
                                 :button1 8 :button2 9 :button3 10 :button4 11
-                                :button5 12}}))
+                                :button5 12
+                                :any-modifier 15}}))
 
 (bin/defbinary point
   [:x ::bin/int16]

@@ -1,13 +1,13 @@
 (in-ns 'org.subluminal.xproto)
 
 (define-core-op
-  (::open-font (+ 3 (/ (pad4 (count (:name open-font))) 4))
+  (::open-font (+ 3 (/ (bin/pad4 (count (:name open-font))) 4))
     (skip 1)
     [:fid ::font {:aux *alloc-resource*}]
     [:name-len ::card16 {:aux (count (:name open-font))}]
     (skip 2)
     [:name [::ascii (count (:name open-font))]]
-    (skip (padd4 name-len))))
+    (skip (bin/padd4 name-len))))
 
 (define-core-op
   (::close-font 2
@@ -28,13 +28,13 @@
     [:max-char ::card16]
     [:default-char ::card16]
     [:num-props ::card16 {:aux 0}]
-    [:draw-direction ::card8 {:xenum {:left-to-right 0 :right-to-left 1}}]
+    [:draw-direction ::card8 {:enum {:left-to-right 0 :right-to-left 1}}]
     [:min-byte1 ::card8]
     [:max-byte1 ::card8]
     [:all-chars-exist ::card8]
     [:font-ascent ::bin/int16]
     [:font-descent ::bin/int16]
-    [:num-charinfo ::card32 {:aux 0}]
+    [:num-charinfo ::card32 ]
     [:properties ::fontprop {:times num-props}]
     [:char-infos ::charinfo {:times num-charinfo}]))
 

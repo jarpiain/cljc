@@ -39,7 +39,7 @@
                gdet (gensym)]
            `(bin/defbinary [~(bin/kw->sym (first reply)) ~gdet]
               [~ff ~ftyp ~(merge fopt {:transient gdet})]
-              [:length ::card32] ; introduces binding for 'length in body
+;              [:length ::card32] ; introduces binding for 'length in body
               ~@body))))))
 
 ;; Miscellaneous requests

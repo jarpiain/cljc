@@ -5,7 +5,8 @@
   (case category
     :error [:err ::x-error]
     :reply (do [:arg ::card8]
-               [:serial ::card16])
+               [:serial ::card16]
+               [:length ::card32])
     [:event (@(:event-codes *display*) category)]))
 
 (bin/defbinary x-error

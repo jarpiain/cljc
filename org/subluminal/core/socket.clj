@@ -79,15 +79,27 @@
         :reply
         (let [[fmt p :as expect] (dosync
                                    (get @(:replies dpy)
-                                        (:serial reply)))]
+                                        (:serial reply)))
+               szdiff (- (.capacity buf)
+                         (-> reply :length (* 4) (+ 32)))
+               bigbuf (if (>= szdiff 0) buf
+                        (ByteBuffer/allocate (- (.capacity buf) szdiff)))]
+          (when (< szdiff 0)
+            (.put bigbuf (.array buf))
+            (.position bigbuf (.capacity buf))
+            (while (< (.position bigbuf) (.capacity bigbuf))
+              (.read chan bigbuf))
+            (.order bigbuf (.order buf))
+            (.position bigbuf (.position buf)))
           (if expect
-            (let [reply-detail (bin/read-binary fmt buf (:arg reply))]
+            (let [reply-detail (bin/read-binary fmt bigbuf (:arg reply))]
               (deliver-reply dpy (:serial reply) reply-detail))
-            (let [len (bin/read-binary ::card32 buf)]
-              (.position buf
-                         (+ (.position buf)
+            (let [len (:length reply)]
+              (.position bigbuf
+                         (+ (.position bigbuf)
                             24
-                            (* 4 len))))))
+                            (* 4 len)))))
+          bigbuf)
 
         :error
         (let [serial (get-in reply [:err :serial])
@@ -97,10 +109,10 @@
           (if expect
             (deliver-reply dpy serial nil))
           (dosync (ref-set (:last-error dpy)
-                           (:err reply))))
+                           (:err reply)))
+          buf)
 
-        (deliver-event dpy (:event reply)))
-      buf)))
+        (do (deliver-event dpy (:event reply)) buf)))))
 
 (defn- start-x-input [dpy]
   (let [buf (ByteBuffer/allocate 10000)

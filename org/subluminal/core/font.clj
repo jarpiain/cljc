@@ -7,7 +7,7 @@
     [:name-len ::card16 {:aux (count (:name open-font))}]
     (skip 2)
     [:name [::ascii (count (:name open-font))]]
-    (skip (bin/padd4 name-len))))
+    (align 4)))
 
 (define-core-op
   (::close-font 2
@@ -55,7 +55,7 @@
                             (* ,, 2) (/ ,, 4) (+ ,, 2))
     [:font ::fontable]
     [:text ::string16]
-    (skip (bin/padd4 (* 2 (count text)))))
+    (align 4))
   (::query-text-extents-reply
     [:draw-direction ::card8 {:xenum {:left-to-right 0 :right-to-left 1}}]
     [:font-ascent ::bin/int16]
@@ -66,3 +66,17 @@
     [:overall-left ::bin/int32]
     [:overall-right ::bin/int32]
     (skip 4)))
+
+(define-core-op
+  (::list-fonts (-> list-fonts :pattern count bin/pad4 (/ 4) (+ 2))
+    (skip 1)
+    [:max-names ::card16]
+    [:patsize ::card16 {:aux (count (:pattern list-fonts))}]
+    [:pattern ::ascii]
+    (align 4))
+  (::list-fonts-reply
+    [:unused ::card8 {:aux 0}]
+    [:name-count ::card16 {:aux 0}]
+    (skip 22)
+    [:names ::ascii {:times name-count}]
+    (align 4)))

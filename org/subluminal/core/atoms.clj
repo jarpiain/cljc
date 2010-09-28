@@ -7,7 +7,7 @@
     [:name-length ::card16 {:aux (count (:name intern-atom))}]
     (skip 2)
     [:name [::ascii name-length]]
-    (skip (bin/padd4 name-length)))
+    (align 4))
   (::intern-atom-reply
     [:unused ::card8 {:aux 0}]
     [:atom ::atom]
@@ -22,7 +22,7 @@
     [:name-length ::card16 {:aux 0}]
     (skip 22)
     [:name [::ascii name-length]]
-    (skip (bin/padd4 name-length))))
+    (align 4)))
 
 (defn x-intern
   ([kw] (x-intern *display* kw))
@@ -67,7 +67,7 @@
              16 ::card16
              32 ::card32)
            {:times data-len}]
-    (skip (bin/padd4 data-len))))
+    (align 4)))
 
 (define-core-op
   (::delete-property 3
@@ -95,7 +95,7 @@
                    16 ::card16
                    32 ::card32)
                  {:times data-len}]
-           (skip (bin/padd4 (/ (* format data-len) 8)))))))
+           (align 4)))))
 
 (define-core-op
   (::list-properties 2

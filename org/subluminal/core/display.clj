@@ -12,9 +12,9 @@
   (:protocol-data-len ::card16 {:aux (count (:protocol-data x-init-block))})
   (skip 2)
   (:protocol-name [::ascii protocol-name-len])
-  (skip (bin/padd4 protocol-name-len))
+  (align 4)
   (:protocol-data [::ascii protocol-data-len])
-  (skip (bin/padd4 protocol-data-len)))
+  (align 4))
 
 (bin/defbinary x-init-response
   (:status ::card8 {:xenum {:failed 0 :success 1 :authenticate 2}})
@@ -25,7 +25,7 @@
         (:protocol-minor-version ::card16)
         (:extra-data-len ::card16)
         (:reason (::ascii reason-len))
-        (skip (bin/padd4 reason-len)))
+        (align 4))
 
     :authenticate
     (do (skip 5)
@@ -56,7 +56,7 @@
   [:max-keycode ::keycode]
   (skip 4)
   [:vendor [::ascii vendor-len]]
-  (skip (bin/padd4 vendor-len))
+  (align 4)
   [:pixmap-formats ::pixmap-format {:times num-formats}]
   [:screens ::screen {:times num-screens}])
 

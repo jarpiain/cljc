@@ -120,7 +120,7 @@
   (skip 1)
   (:address-len ::card16 {:aux (count (:address host))})
   (:address ::card8 {:times address-len})
-  (skip (bin/padd4 address-len)))
+  (align 4))
 
 (def +predefined-atoms+
      {:PRIMARY 1 :SECONDARY 2 :ARC 3 :ATOM 4 :BITMAP 5

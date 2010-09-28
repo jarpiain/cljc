@@ -257,6 +257,12 @@
     (let [[count] (next fld)]
       `(do (.position ~gbuf (int (+ ~count (.position ~gbuf)))) ~remain))
 
+    (= (first fld) 'align)
+    (let [[align] (next fld)]
+      `(do (.position ~gbuf (bit-and ~(bit-not (dec align))
+                                     (+ (.position ~gbuf) ~(dec align))))
+         ~remain))
+
     (= (first fld) 'if)
     (let [[test then else] (next fld)]
       `(let [~fmt-name (if ~test
@@ -343,6 +349,12 @@
     (= (first fld) 'skip)
     (let [[count] (next fld)]
       `(do (.position ~gbuf (int (+ ~count (.position ~gbuf)))) ~remain))
+
+    (= (first fld) 'align)
+    (let [[align] (next fld)]
+      `(do (.position ~gbuf (bit-and ~(bit-not (dec align))
+                                     (+ (.position ~gbuf) ~(dec align))))
+         ~remain))
 
     (= (first fld) 'if)
     (let [[test then else] (next fld)]

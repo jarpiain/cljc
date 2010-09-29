@@ -150,5 +150,10 @@
 
 (defn deliver-reply [dpy serial reply]
   (let [[fmt p :as expect] (get @(:replies dpy) serial)]
-    (dosync (commute (-> dpy :replies) dissoc serial))
-    (deliver p reply)))
+    (if (seq? p)
+      (dosync (commute (-> dpy :replies) update-in [serial 1] rest))
+      (dosync (commute (-> dpy :replies) dissoc serial)))
+    (deliver (if (seq? p)
+               (first p)
+               p)
+             reply)))

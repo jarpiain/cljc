@@ -240,7 +240,8 @@
 
 (defmethod bin/read-binary ::ascii
   ([_ buf]
-     (bin/read-binary ::ascii buf (bin/read-binary ::card8 buf)))
+     (let [len (bin/read-binary ::card8 buf)]
+       (bin/read-binary ::ascii buf len)))
   ([_ buf len]
      (apply str
 	    (repeatedly len

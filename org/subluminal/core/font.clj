@@ -72,7 +72,7 @@
     (skip 1)
     [:max-names ::card16]
     [:patsize ::card16 {:aux (count (:pattern list-fonts))}]
-    [:pattern ::ascii]
+    [:pattern [::ascii (count (:pattern list-fonts))]]
     (align 4))
   (::list-fonts-reply
     [:unused ::card8 {:aux 0}]
@@ -80,3 +80,34 @@
     (skip 22)
     [:names ::ascii {:times name-count}]
     (align 4)))
+
+(define-core-op
+  (::list-fonts-with-info (-> list-fonts-with-info
+                              :pattern count bin/pad4 (/ 4) (+ 2))
+    (skip 1)
+    [:max-names ::card16]
+    [:patsize ::card16 {:aux (count (:pattern list-fonts-with-info))}]
+    [:pattern [::ascii (count (:pattern list-fonts-with-info))]]
+    (align 4))
+  (::list-fonts-with-info-reply
+    [:name-len ::card8]
+    (if true ; (pos? name-len)
+      (do
+        [:min-bounds ::charinfo]
+        (skip 4)
+        [:max-bounds ::charinfo]
+        (skip 4)
+        [:min-char ::card16]
+        [:max-char ::card16]
+        [:default-char ::card16]
+        [:num-props ::card16 {:aux 0}]
+        [:draw-direction ::card8 {:xenum {:left-to-right 0 :right-to-left 1}}]
+        [:min-byte1 ::card8]
+        [:max-byte1 ::card8]
+        [:all-chars-exist ::card8]
+        [:font-ascent ::bin/int16]
+        [:font-descent ::bin/int16]
+        [:replies-hint ::card32]
+        [:properties ::fontprop {:times num-props}]
+        [:name [::ascii name-len]]
+        (align 4)))))

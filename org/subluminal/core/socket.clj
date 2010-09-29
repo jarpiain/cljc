@@ -167,4 +167,16 @@
            (alter (:replies dpy) assoc (bit-and 0xFFFF serial) [rply p])
            p))
        (throw (IllegalArgumentException.
-		(str "No reply format defined for " tag))))))
+                (str "No reply format defined for " tag))))))
+
+(defn wait-more-x
+  ([tag req] (wait-more-x *display* tag req))
+  ([dpy tag req]
+     (if-let [rply (*reply-formats* tag)]
+       (dosync
+         (let [serial (send-x dpy tag req)
+               ps (repeatedly promise)]
+           (alter (:replies dpy) assoc (bit-and 0xFFFF serial) [rply ps])
+           ps))
+       (throw (IllegalArgumentException.
+                (str "No reply format defined for " tag))))))

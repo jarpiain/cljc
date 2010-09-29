@@ -22,3 +22,4 @@
 (load "core/pointer")
 (load "core/keys")
 (load "core/font")
+(load "core/pixmap")

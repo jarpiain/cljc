@@ -50,19 +50,35 @@
 
 ;; Helper to create a window with useful default values
 ;; Required args: x y width height
-(defn create-toplevel-window [args vals]
-  (let [vals (merge {:background-pixel (:white-pixel (get-screen))
-                     :event-mask #{:key-press :button-press :exposure}}
+(defn create-toplevel-window
+  ([args vals] (create-toplevel-window *display* args vals))
+  ([dpy args vals]
+   (let [vals (merge {:background-pixel (:white-pixel (get-screen dpy))}
+                      vals)]
+     (alloc-x dpy ::create-window
+              (merge {:parent (:root (get-screen dpy))
+                      :depth (:root-depth (get-screen dpy))
+                      :border-width 0
+                      :class :input-output
+                      :visual :copy-from-parent
+                      :value-mask (set (keys vals))
+                      :values vals}
+                     args)))))
+
+(defn create-input-window
+  ([args vals] (create-input-window *display* args vals))
+  ([dpy args vals]
+   (let [vals (merge {:event-mask #{:key-press :button-press :exposure}}
                      vals)]
-    (alloc-x *display* ::create-window
-             (merge {:parent (:root (get-screen))
-                     :depth (:root-depth (get-screen))
-                     :border-width 0
-                     :class :input-output
-                     :visual :copy-from-parent
-                     :value-mask (set (keys vals))
-                     :values vals}
-                    args))))
+     (alloc-x dpy ::create-window
+              (merge {:parent (:root (get-screen dpy))
+                      :depth 0
+                      :border-width 0
+                      :class :input-only
+                      :visual :copy-from-parent
+                      :value-mask (set (keys vals))
+                      :values vals}
+                      args)))))
 
 (define-core-op
   (::change-window-attributes

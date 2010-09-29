@@ -3,7 +3,7 @@
 ; merge with core/window?
 
 (define-core-op
-  (::create-pixmap
+  (::create-pixmap 4
     [:depth ::card8]
     [:pid *alloc-resource*]
     [:drawable ::drawable]
@@ -11,6 +11,6 @@
     [:height ::card16]))
 
 (define-core-op
-  (::free-pixmap
+  (::free-pixmap 2
     (skip 1)
     [:pixmap ::pixmap]))

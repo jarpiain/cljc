@@ -91,7 +91,7 @@
     (align 4))
   (::list-fonts-with-info-reply
     [:name-len ::card8]
-    (if true ; (pos? name-len)
+    (if (pos? name-len)
       (do
         [:min-bounds ::charinfo]
         (skip 4)
@@ -110,4 +110,23 @@
         [:replies-hint ::card32]
         [:properties ::fontprop {:times num-props}]
         [:name [::ascii name-len]]
-        (align 4)))))
+        (align 4))
+      (skip 52))))
+
+(define-core-op
+  (::set-font-path (+ 2 (reduce + (map #(inc (count %))
+                                       (:path set-font-path))))
+    (skip 1)
+    [:num-paths ::card16 {:aux (count (:path set-font-path))}]
+    (skip 2)
+    [:path ::ascii {:times (count (:path set-font-path))}]
+    (align 4)))
+
+(define-core-op
+  (::get-font-path 1 (skip 1))
+  (::get-font-path-reply
+    [:unused ::card8 {:aux 0}]
+    [:num-paths ::card16 {:aux 0}]
+    (skip 22)
+    [:path ::ascii {:times num-paths}]
+    (align 4)))

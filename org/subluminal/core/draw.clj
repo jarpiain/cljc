@@ -95,7 +95,7 @@
    (alloc-x dpy ::create-gc
             {:drawable wnd
              :value-mask (set (keys opts))
-             :values opts)))
+             :values opts})))
 
 (defn change-gc
   ([gc opts] (change-gc *display* gc opts))
@@ -111,3 +111,26 @@
     [:source ::gcontext]
     [:dest   ::gcontext]
     [:value-mask ::gc-valuemask]))
+
+(define-core-op
+  (::set-dashes (+ 3 (/ (bin/pad4 (:num-dashes set-dashes)) 4))
+    (skip 1)
+    [:gc ::gcontext]
+    [:dash-offset ::card16]
+    [:num-dashes ::card16 {:aux (count (:dashes set-dashes))}]
+    [:dashes ::card8 {:times 1}]
+    (align 4)))
+
+(define-core-op
+  (::set-clip-rectangles (+ 3 (* 2 (count (:rectangles set-clip-rectangles))))
+    [:ordering ::card8
+      {:xenum {:unsorted 0 :y-sorted 1 :yx-sorted 2 :yx-banded 3}}]
+    [:gc ::gcontext]
+    [:clip-x-origin ::bin/int16]
+    [:clip-y-origin ::bin/int16]
+    [:rectangles ::rectangle {:times 1}]))
+
+(define-core-op
+  (::free-gc 2
+    (skip 1)
+    [:gc ::gcontext]))

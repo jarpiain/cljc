@@ -68,7 +68,7 @@
 (defn create-input-window
   ([args vals] (create-input-window *display* args vals))
   ([dpy args vals]
-   (let [vals (merge {:event-mask #{:key-press :button-press :exposure}}
+   (let [vals (merge {:override-redirect 1}
                      vals)]
      (alloc-x dpy ::create-window
               (merge {:parent (:root (get-screen dpy))

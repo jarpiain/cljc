@@ -25,3 +25,4 @@
 (load "core/pixmap")
 (load "core/draw")
 (load "core/image")
+(load "core/text")

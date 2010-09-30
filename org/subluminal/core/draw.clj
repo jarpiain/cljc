@@ -134,3 +134,80 @@
   (::free-gc 2
     (skip 1)
     [:gc ::gcontext]))
+
+(define-core-op
+  (::clear-area 4
+    [:exposures ::card8]
+    [:window ::window]
+    [:x ::bin/int16]
+    [:y ::bin/int16]
+    [:width ::card16]
+    [:height ::card16]))
+
+(define-core-op
+  (::copy-area 7
+    (skip 1)
+    [:source ::drawable]
+    [:dest   ::drawable]
+    [:gc ::gcontext]
+    [:src-x ::bin/int16]
+    [:src-y ::bin/int16]
+    [:dst-x ::bin/int16]
+    [:dst-y ::bin/int16]
+    [:width ::card16]
+    [:height ::card16]))
+
+(define-core-op
+  (::copy-plane 8
+    (skip 1)
+    [:source ::drawable]
+    [:dest ::drawable]
+    [:gc ::gcontext]
+    [:src-x ::bin/int16]
+    [:src-y ::bin/int16]
+    [:dst-x ::bin/int16]
+    [:dst-y ::bin/int16]
+    [:width ::card16]
+    [:height ::card16]
+    [:bit-plane ::card32]))
+
+(define-core-op
+  (::poly-point (+ 3 (count (:points poly-point)))
+    [:coordinate-mode ::card8 {:xenum {:origin 0 :previous 1}}]
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:points ::point {:times 1}]))
+
+(define-core-op
+  (::poly-line (+ 3 (count (:points poly-line)))
+    [:coordinate-mode ::card8 {:xenum {:origin 0 :previous 1}}]
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:points ::point {:times 1}]))
+
+(bin/defbinary segment
+  [:x1 ::bin/int16]
+  [:y1 ::bin/int16]
+  [:x2 ::bin/int16]
+  [:y2 ::bin/int16])
+
+(define-core-op
+  (::poly-segment (+ 3 (* 2 (count (:segments poly-segment))))
+    (skip 1)
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:segments ::segment {:times 1}]))
+
+(define-core-op
+  (::poly-rectangle (+ 3 (* 2 (count (:rectangles poly-rectangle))))
+    (skip 1)
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:rectangles ::rectangle {:times 1}]))
+
+(define-core-op
+  (::poly-arc (+ 3 (* 3 (count (:arcs poly-arc))))
+    (skip 1)
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:arcs ::arc {:times 1}]))

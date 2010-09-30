@@ -71,19 +71,81 @@
          column (get-column row (:state evt))]
      (get-in @(:keymap dpy) [row column]))))
 
+(def *control-keysyms*
+     {0xFF08 :backspace
+      0xFF09 :tab
+      0xFF0A :linefeed
+      0xFF0B :clear
+      0xFF0D :return
+      0xFF13 :pause
+      0xFF14 :scroll-lock
+      0xFF15 :sys-req
+      0xFF1B :escape
+      0xFF20 :multi-key
+      0xFF21 :kanji
+      0xFF22 :muhenkan
+      0xFF23 :henkan
+      0xFF24 :romaji
+      0xFF25 :hiragana
+      0xFF26 :katakana
+      0xFF50 :home
+      0xFF51 :left
+      0xFF52 :up
+      0xFF53 :right
+      0xFF54 :down
+      0xFF55 :page-up
+      0xFF56 :page-down
+      0xFF57 :end
+      0xFF58 :begin
+      0xFF60 :select
+      0xFF61 :print
+      0xFF62 :execute
+      0xFF63 :insert
+      0xFF65 :undo
+      0xFF66 :redo
+      0xFF67 :menu
+      0xFF68 :find
+      0xFF69 :cancel
+      0xFF6A :help
+      0xFF6B :break
+      0xFF7E :mode-switch
+      0xFF7F :num-lock
+      0xFF80 :keypad-space
+      0xFF81 :keypad-tab
+      0xFF8D :keypad-enter
+      0xFFE1 :left-shift
+      0xFFE2 :right-shift
+      0xFFE3 :left-control
+      0xFFE4 :right-control
+      0xFFE5 :caps-lock
+      0xFFE6 :shift-lock
+      0xFFE7 :left-meta
+      0xFFE8 :right-meta
+      0xFFE9 :left-alt
+      0xFFEA :right-alt
+      0xFFEB :left-super
+      0xFFEC :right-super
+      0xFFED :left-hyper
+      0xFFEE :right-hyper
+      0xFFFF :delete})
+
+(defn translate-keysym [ksym]
+  (cond
+    (zero? ksym) :NoSymbol
+    (= ksym 0x00FFFFFF) :VoidSymbol
+    
+    (or (<= 0x20 ksym 0x7E)
+        (<= 0xA0 ksym 0xFF))
+    (char ksym)
+    
+    (<= 0x1000100 ksym 0x110FFFF)
+    (char (- ksym 0x1000000))
+    
+    :default (if-let [ctl (*control-keysyms* ksym)]
+               ctl
+               ksym)))
+
 (defn translate-key
   ([evt] (translate-key *display* evt))
   ([dpy evt]
-   (let [ksym (keycode->keysym dpy evt)]
-     (cond
-       (zero? ksym) :NoSymbol
-       (= ksym 0x00FFFFFF) :VoidSymbol
-
-       (or (<= 0x20 ksym 0x7E)
-           (<= 0xA0 ksym 0xFF))
-       (char ksym)
-
-       (<= 0x1000100 ksym 0x110FFFF)
-       (char (- ksym 0x1000000))
-
-       :default ksym))))
+   (translate-keysym (keycode->keysym dpy evt))))

@@ -53,5 +53,17 @@
     [:event ::card8 {:times 32}]))
 
 (define-core-op
+  (::query-best-size 3
+    [:class ::card8 {:xenum {:cursor 0 :tile 1 :stipple 2}}]
+    [:drawable ::drawable]
+    [:width ::card16]
+    [:height ::card16])
+  (::query-best-size-reply
+    [:unused ::card8 {:aux 0}]
+    [:width ::card16]
+    [:height ::card16]
+    (skip 20)))
+
+(define-core-op
   (::no-operation 1
     (skip 1)))

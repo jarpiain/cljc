@@ -27,3 +27,4 @@
 (load "core/image")
 (load "core/text")
 (load "core/colormap")
+(load "core/ext")

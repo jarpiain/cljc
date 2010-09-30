@@ -36,10 +36,10 @@
             ~@body))
       ~(when reply
          (let [[tag [ff ftyp fopt] & body] reply
-               gdet (gensym)]
-           `(bin/defbinary [~(bin/kw->sym (first reply)) ~gdet]
+               gdet (gensym)
+               lsym 'reply-length]
+           `(bin/defbinary [~(bin/kw->sym (first reply)) ~gdet ~lsym]
               [~ff ~ftyp ~(merge fopt {:transient gdet})]
-;              [:length ::card32] ; introduces binding for 'length in body
               ~@body))))))
 
 ;; Miscellaneous requests

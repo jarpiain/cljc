@@ -41,6 +41,7 @@
              :promised-events (ref (PersistentQueue/EMPTY))
              :last-error (ref nil)
 
+             :keymap (ref nil)
              :replies (ref {})
              :buffer (agent buf)
              :channel chan)
@@ -92,7 +93,9 @@
             (.order bigbuf (.order buf))
             (.position bigbuf (.position buf)))
           (if expect
-            (let [reply-detail (bin/read-binary fmt bigbuf (:arg reply))]
+            (let [reply-detail (bin/read-binary fmt bigbuf
+                                                (:arg reply)
+                                                (:length reply))]
               (deliver-reply dpy (:serial reply) reply-detail))
             (let [len (:length reply)]
               (.position bigbuf

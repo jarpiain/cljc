@@ -47,3 +47,49 @@
     [:dst-y ::bin/int16]))
 
 ;; cursor
+
+(define-core-op
+  (::create-cursor 8
+    (skip 1)
+    [:cid ::cursor {:aux *alloc-resource*}]
+    [:source ::pixmap]
+    [:mask ::pixmap]
+    [:fore-red ::card16]
+    [:fore-green ::card16]
+    [:fore-blue ::card16]
+    [:back-red ::card16]
+    [:back-green ::card16]
+    [:back-blue ::card16]
+    [:x ::card16]
+    [:y ::card16]))
+
+(define-core-op
+  (::create-glyph-cursor 8
+    (skip 1)
+    [:cid ::cursor {:aux *alloc-resource*}]
+    [:source-font ::font]
+    [:mask-font ::font]
+    [:source-char ::card16]
+    [:mask-char ::card16]
+    [:fore-red ::card16]
+    [:fore-green ::card16]
+    [:fore-blue ::card16]
+    [:back-red ::card16]
+    [:back-green ::card16]
+    [:back-blue ::card16]))
+
+(define-core-op
+  (::free-cursor 2
+    (skip 1)
+    [:cursor ::cursor]))
+
+(define-core-op
+  (::recolor-cursor 5
+    (skip 1)
+    [:cursor ::cursor]
+    [:fore-red ::card16]
+    [:fore-green ::card16]
+    [:fore-blue ::card16]
+    [:back-red ::card16]
+    [:back-green ::card16]
+    [:back-blue ::card16]))

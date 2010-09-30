@@ -75,17 +75,17 @@
 (define-core-op
   (::create-gc (+ 4 (count (:value-mask create-gc)))
     (skip 1)
-    [:cid *alloc-resource*]
+    [:cid ::gcontext {:aux *alloc-resource*}]
     [:drawable ::drawable]
     [:value-mask ::gc-valuemask]
-    [:values ::gc-values]))
+    [:values [::gc-values value-mask]]))
 
 (define-core-op
   (::change-gc (+ 3 (count (:value-mask change-gc)))
     (skip 1)
     [:gc ::gcontext]
     [:value-mask ::gc-valuemask]
-    [:values ::gc-values]))
+    [:values [::gc-values value-mask]]))
 
 ;; Helper functions to manipulate gcs
 (defn create-gc
@@ -207,6 +207,30 @@
 
 (define-core-op
   (::poly-arc (+ 3 (* 3 (count (:arcs poly-arc))))
+    (skip 1)
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:arcs ::arc {:times 1}]))
+
+(define-core-op
+  (::fill-poly (+ 4 (count (:points fill-poly)))
+    (skip 1)
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:shape ::card8 {:xenum {:complex 0 :nonconvex 1 :convex 2}}]
+    [:coordinate-mode ::card8 {:xenum {:origin 0 :previous 1}}]
+    (skip 2)
+    [:points ::point {:times 1}]))
+
+(define-core-op
+  (::poly-fill-rectangle (+ 3 (* 2 (count (:rectangles poly-fill-rectangle))))
+    (skip 1)
+    [:drawable ::drawable]
+    [:gc ::gcontext]
+    [:rectangles ::rectangle {:times 1}]))
+
+(define-core-op
+  (::poly-fill-arc (+ 3 (* 3 (count (:arcs poly-fill-arc))))
     (skip 1)
     [:drawable ::drawable]
     [:gc ::gcontext]

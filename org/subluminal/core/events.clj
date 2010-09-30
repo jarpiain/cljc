@@ -7,7 +7,7 @@
     :reply (do [:arg ::card8]
                [:serial ::card16]
                [:length ::card32])
-    [:event (@(:event-codes *display*) category)]))
+    (skip 0)))
 
 (bin/defbinary x-error
   [:code ::card8 {:enum {:request 1 :value 2 :window 3 :pixmap 4 :atom 5

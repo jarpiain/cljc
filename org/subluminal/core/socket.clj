@@ -112,7 +112,10 @@
                            (:err reply)))
           buf)
 
-        (do (deliver-event dpy (:event reply)) buf)))))
+        ; event
+        (let [code (@(:event-codes dpy) (:category reply))
+              evt (bin/read-binary code buf)]
+          (do (deliver-event dpy evt) buf))))))
 
 (defn- start-x-input [dpy]
   (let [buf (ByteBuffer/allocate 10000)

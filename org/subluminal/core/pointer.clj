@@ -93,3 +93,22 @@
     [:back-red ::card16]
     [:back-green ::card16]
     [:back-blue ::card16]))
+
+(define-core-op
+  (::change-pointer-control 3
+    (skip 1)
+    [:acceleration-numerator ::bin/int16]
+    [:acceleration-denominator ::bin/int16]
+    [:threshold ::bin/int16]
+    [:do-acceleration ::card8]
+    [:do-threshold ::card8]))
+
+(define-core-op
+  (::get-pointer-control 1
+    (skip 1))
+  (::get-pointer-control-reply
+    [:unused ::card8 {:aux 0}]
+    [:acceleration-numerator ::card16]
+    [:acceleration-denominator ::card16]
+    [:threshold ::card16]
+    (skip 18)))

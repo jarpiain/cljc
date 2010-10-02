@@ -69,5 +69,24 @@
     [:percent ::bin/int8]))
 
 (define-core-op
+  (::set-screen-saver 3
+    (skip 1)
+    [:timeout ::bin/int16]
+    [:interval ::bin/int16]
+    [:prefer-blanking ::card8 {:xenum {:no 0 :yes 1 :default 2}}]
+    [:allow-exposures ::card8 {:xenum {:no 0 :yes 1 :default 2}}]))
+
+(define-core-op
+  (::get-screen-saver 1
+    (skip 1))
+  (::get-screen-saver-reply
+    [:unused ::card8 {:aux 0}]
+    [:timeout ::card16]
+    [:interval ::card16]
+    [:prefer-blanking ::card8]
+    [:allow-exposures ::card8]
+    (skip 18)))
+
+(define-core-op
   (::no-operation 1
     (skip 1)))

@@ -74,7 +74,8 @@
     [:timeout ::bin/int16]
     [:interval ::bin/int16]
     [:prefer-blanking ::card8 {:xenum {:no 0 :yes 1 :default 2}}]
-    [:allow-exposures ::card8 {:xenum {:no 0 :yes 1 :default 2}}]))
+    [:allow-exposures ::card8 {:xenum {:no 0 :yes 1 :default 2}}]
+    (skip 2)))
 
 (define-core-op
   (::get-screen-saver 1
@@ -86,6 +87,40 @@
     [:prefer-blanking ::card8]
     [:allow-exposures ::card8]
     (skip 18)))
+
+(define-core-op
+  (::change-hosts (+ 2 (/ (bin/pad4 (count (:address change-hosts))) 4))
+    [:mode ::card8 {:xenum {:insert 0 :delete 1}}]
+    [:family ::card8 {:xenum {:internet 0 :decnet 1 :chaos 2}}]
+    (skip 1)
+    [:address-length ::card8 {:aux (count (:address change-hosts))}]
+    [:address ::card8 {:times 1}]
+    (align 4)))
+
+(define-core-op
+  (::list-hosts 1
+    (skip 1))
+  (::list-hosts-reply
+    [:mode ::card8 {:xenum {:disabled 0 :enabled 1}}]
+    [:num-hosts ::card16 {:aux 0}]
+    (skip 22)
+    [:hosts ::host {:times num-hosts}]))
+
+(define-core-op
+  (::set-access-control 1
+    [:mode ::card8 {:xenum {:disable 0 :enable 1}}]))
+
+(define-core-op
+  (::set-close-down-mode 1
+    [:mode ::card8
+       {:xenum {:destroy 0
+                :retain-permanent 1
+                :retain-temporary 2}}]))
+
+(define-core-op
+  (::kill-client 2
+    (skip 1)
+    [:resource ::card32]))
 
 (define-core-op
   (::no-operation 1

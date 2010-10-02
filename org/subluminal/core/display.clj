@@ -135,12 +135,12 @@
 (defn deliver-event [dpy evt]
   (.put (:events @dpy) evt))
 
-(defn deliver-reply [dpy serial reply]
-  (let [[fmt p :as expect] (get @(:replies @dpy) serial)]
-    (deliver (if (seq? p)
-               (first p)
-               p)
-             reply)
-    (if (seq? p)
-      (dosync (alter (:replies @dpy) update-in [serial 1] rest))
-      (dosync (alter (:replies @dpy) dissoc serial)))))
+;(defn deliver-reply [dpy serial reply]
+;  (let [[fmt p :as expect] (get @(:replies @dpy) serial)]
+;    (deliver (if (seq? p)
+;               (first p)
+;               p)
+;             reply)
+;    (if (seq? p)
+;      (dosync (alter (:replies @dpy) update-in [serial 1] rest))
+;      (dosync (alter (:replies @dpy) dissoc serial)))))

@@ -42,10 +42,29 @@
              :last-error (ref nil)
 
              :keymap nil
-             :replies (ref {})
+             :replies (LinkedBlockingQueue.)
              :buffer buf
              :channel chan)
       result)))
+
+(defn- seek-reply [dpy serial]
+  (let [que (:replies @dpy)]
+    (loop [rply (.peek que)]
+      (when rply
+        (let [[ser fmt p] rply]
+          (cond
+            (= ser serial) rply
+
+            (< ser serial)
+            (do (.poll que) (recur (.peek que)))
+
+            :else
+            nil))))))
+
+(defn- deliver-reply [dpy serial reply]
+  (when-let [[ser fmt p] (seek-reply dpy serial)]
+    (deliver p reply)
+    (.poll (:replies @dpy))))
 
 ;; Initiate connection and setup display structure
 
@@ -85,8 +104,7 @@
     (let [reply (bin/read-binary ::x-reply buf)]
       (case (:category reply)
         :reply
-        (let [[fmt p :as expect] (get @(:replies @dpy)
-                                      (:serial reply))
+        (let [[_ fmt p :as expect] (seek-reply dpy (:serial reply))
                szdiff (- (.capacity buf)
                          (-> reply :length (* 4) (+ 32)))
                bigbuf (if (>= szdiff 0) buf
@@ -186,9 +204,8 @@
        (let [p (promise)]
          (send-off dpy
            (fn [dpy]
-             (dosync
-               (alter (:replies dpy)
-                      assoc (bit-and 0xFFFF (:next-serial dpy)) [rply p]))
+             (.put (:replies dpy)
+                   [(bit-and 0xFFFF (:next-serial dpy)) rply p])
              (flush-display (request-action dpy tag req))))
          p)
        (throw (IllegalArgumentException.
@@ -204,7 +221,7 @@
              (dosync
                (alter (:replies dpy)
                       assoc (bit-and 0xFFFF (:next-serial dpy)) [rply ps]))
-             (request-action dpy tag req)))
+             (flush-display (request-action dpy tag req))))
          ps)
        (throw (IllegalArgumentException.
                 (str "No reply format defined for " tag))))))

@@ -1,6 +1,7 @@
 (ns org.subluminal.xproto
   (:refer-clojure)
-  (:import (java.nio ByteBuffer ByteOrder)
+  (:import (java.nio ByteBuffer ByteOrder
+                     BufferOverflowException)
 	   (java.nio.channels SocketChannel)
 	   (java.net InetSocketAddress)
      (java.util.concurrent LinkedBlockingQueue TimeUnit)

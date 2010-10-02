@@ -136,12 +136,30 @@
 
 ;; Send general requests
 
-(defn- request-action [dpy tag req]
+(defn flush-display [dpy]
   (let [buf (:buffer dpy)]
-    (.clear buf)
-    (bin/write-binary tag buf req)
-    (.flip buf)
-    (.write (:channel dpy) buf)
+    (when-not (zero? (.position buf))
+      (.flip buf)
+      (.write (:channel dpy) buf)
+      (.clear buf)))
+  dpy)
+
+(defn- check-out-buf [dpy]
+  (when (< (.remaining (:buffer dpy)) 32)
+    (flush-display dpy)))
+
+(defn- request-action [dpy tag req]
+  (let [^ByteBuffer buf (:buffer dpy)]
+    (check-out-buf dpy)
+    (let [pos (.position buf)]
+      (try
+        (bin/write-binary tag buf req)
+        (catch BufferOverflowException e
+          (.position buf (+ pos 2))
+          (let [siz (bin/read-binary ::card16 buf)]
+            (.position buf pos)
+            (flush-display dpy)
+            (bin/write-binary tag buf req)))))
     (update-in dpy [:next-serial] inc)))
 
 (defn request
@@ -171,19 +189,22 @@
              (dosync
                (alter (:replies dpy)
                       assoc (bit-and 0xFFFF (:next-serial dpy)) [rply p]))
-             (request-action dpy tag req)))
+             (flush-display (request-action dpy tag req))))
          p)
        (throw (IllegalArgumentException.
                 (str "No reply format defined for " tag))))))
 
-;(defn wait-more-x
-;  ([tag req] (wait-more-x *display* tag req))
-;  ([dpy tag req]
-;     (if-let [rply (*reply-formats* tag)]
-;       (dosync
-;         (let [serial (send-x dpy tag req)
-;               ps (repeatedly promise)]
-;           (alter (:replies dpy) assoc (bit-and 0xFFFF serial) [rply ps])
-;           ps))
-;       (throw (IllegalArgumentException.
-;                (str "No reply format defined for " tag))))))
+(defn query-more
+  ([tag req] (query-more *display* tag req))
+  ([dpy tag req]
+     (if-let [rply (*reply-formats* tag)]
+       (let [ps (repeatedly promise)]
+         (send-off dpy
+           (fn [dpy]
+             (dosync
+               (alter (:replies dpy)
+                      assoc (bit-and 0xFFFF (:next-serial dpy)) [rply ps]))
+             (request-action dpy tag req)))
+         ps)
+       (throw (IllegalArgumentException.
+                (str "No reply format defined for " tag))))))

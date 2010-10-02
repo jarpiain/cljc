@@ -89,6 +89,10 @@
     (skip 18)))
 
 (define-core-op
+  (::force-screen-saver 1
+    [:mode ::card8 {:xenum {:reset 0 :activate 1}}]))
+
+(define-core-op
   (::change-hosts (+ 2 (/ (bin/pad4 (count (:address change-hosts))) 4))
     [:mode ::card8 {:xenum {:insert 0 :delete 1}}]
     [:family ::card8 {:xenum {:internet 0 :decnet 1 :chaos 2}}]

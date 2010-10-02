@@ -107,6 +107,14 @@
     (skip 22)
     [:atoms ::atom {:times num-atoms}]))
 
+(define-core-op
+  (::rotate-properties (+ 3 (count (:properties rotate-properties)))
+    (skip 1)
+    [:window ::window]
+    [:num-properties ::card16 {:aux (count (:properties rotate-properties))}]
+    [:delta ::bin/int16]
+    [:properties ::atom {:times 1}]))
+
 ;; Todo: get actual property values
 (defn get-properties
   ([wnd] (get-properties *display* wnd))

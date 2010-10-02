@@ -19,7 +19,7 @@
   (.flip buf)
   (bin/read-binary tag buf))
 
-(defn- x-handshake [chan buf]
+(defn- x-handshake [chan ^ByteBuffer buf]
   (send-channel chan buf ::x-init-block
     {:byte-order :le, :major-version 11, :minor-version 0,
      :protocol-name "", :protocol-data ""})
@@ -48,7 +48,7 @@
       result)))
 
 (defn- seek-reply [dpy serial]
-  (let [que (:replies @dpy)]
+  (let [^BlockingQueue que (:replies @dpy)]
     (loop [rply (.peek que)]
       (when rply
         (let [[ser fmt p] rply]
@@ -63,8 +63,9 @@
 
 (defn- deliver-reply [dpy serial reply]
   (when-let [[ser fmt p] (seek-reply dpy serial)]
-    (deliver p reply)
-    (.poll (:replies @dpy))))
+    (let [^BlockingQueue q (:replies @dpy)]
+      (deliver p reply)
+      (.poll q))))
 
 ;; Initiate connection and setup display structure
 
@@ -87,7 +88,7 @@
 
 (declare deliver-reply deliver-event)
 
-(defn- clear-buffer [buf chan]
+(defn- clear-buffer [^ByteBuffer buf ^SocketChannel chan]
   (when (< (.remaining buf) 32)
     (let [arr (make-array Byte/TYPE 32)
           siz (.remaining buf)]
@@ -97,7 +98,7 @@
       (.read chan buf)
       (.flip buf))))
 
-(defn- x-input-loop [buf chan dpy]
+(defn- x-input-loop [^ByteBuffer buf ^SocketChannel chan dpy]
   (when (.isOpen chan)
     (send-off *agent* x-input-loop chan dpy)
     (clear-buffer buf chan)
@@ -155,16 +156,18 @@
 ;; Send general requests
 
 (defn flush-display [dpy]
-  (let [buf (:buffer dpy)]
+  (let [^ByteBuffer buf (:buffer dpy)
+        ^SocketChannel chan (:channel dpy)]
     (when-not (zero? (.position buf))
       (.flip buf)
-      (.write (:channel dpy) buf)
+      (.write chan buf)
       (.clear buf)))
   dpy)
 
 (defn- check-out-buf [dpy]
-  (when (< (.remaining (:buffer dpy)) 32)
-    (flush-display dpy)))
+  (let [^ByteBuffer buf (:buffer dpy)]
+    (when (< (.remaining buf) 32)
+      (flush-display dpy))))
 
 (defn- request-action [dpy tag req]
   (let [^ByteBuffer buf (:buffer dpy)]
@@ -204,7 +207,7 @@
        (let [p (promise)]
          (send-off dpy
            (fn [dpy]
-             (.put (:replies dpy)
+             (.put ^BlockingQueue (:replies dpy)
                    [(bit-and 0xFFFF (:next-serial dpy)) rply p])
              (flush-display (request-action dpy tag req))))
          p)

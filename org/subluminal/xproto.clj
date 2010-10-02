@@ -4,7 +4,7 @@
                      BufferOverflowException)
 	   (java.nio.channels SocketChannel)
 	   (java.net InetSocketAddress)
-     (java.util.concurrent LinkedBlockingQueue TimeUnit)
+     (java.util.concurrent LinkedBlockingQueue BlockingQueue TimeUnit)
 	   (clojure.lang PersistentQueue))
   (:require (org.subluminal [binfmt :as bin])))
 

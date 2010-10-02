@@ -239,29 +239,29 @@
 
 
 (defmethod bin/read-binary ::ascii
-  ([_ buf]
+  ([_ ^ByteBuffer buf]
      (let [len (bin/read-binary ::card8 buf)]
        (bin/read-binary ::ascii buf len)))
-  ([_ buf len]
+  ([_ ^ByteBuffer buf len]
      (apply str
 	    (repeatedly len
 			(fn []
 			  (char (bin/read-binary ::card8 buf)))))))
 
 (defmethod bin/write-binary ::ascii
-  ([_ buf obj] (bin/write-binary ::card8 buf (count obj))
+  ([_ ^ByteBuffer buf obj] (bin/write-binary ::card8 buf (count obj))
                (doseq [ch obj] (bin/write-binary ::card8 buf (int ch))))
-  ([_ buf obj len]
+  ([_ ^ByteBuffer buf obj len]
     (doseq [ch obj] (bin/write-binary ::card8 buf (int ch)))))
 
 (defmethod bin/write-binary ::string16
   ;; XXX
-  ([_ buf obj] (bin/write-binary ::string16 buf obj 0))
-  ([_ buf obj n]
+  ([_ ^ByteBuffer buf obj] (bin/write-binary ::string16 buf obj 0))
+  ([_ ^ByteBuffer buf obj n]
    (doseq [ch obj] (bin/write-binary ::card16 buf (int ch)))))
 
 (defmethod  bin/read-binary ::string16
-  ([_ buf obj n]
+  ([_ ^ByteBuffer buf obj n]
      (apply str
        (repeatedly n
          (fn []

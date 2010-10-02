@@ -53,80 +53,80 @@
 ;;; primitive types
 
 (defmethod read-binary ::int8
-  [_ #^ByteBuffer buf] (.get buf))
+  [_ ^ByteBuffer buf] (.get buf))
 (defmethod write-binary ::int8
-  [_ #^ByteBuffer buf x] (.put buf (byte x)))
+  [_ ^ByteBuffer buf x] (.put buf (byte x)))
 (defmethod read-binary ::uint8
-  [_ #^ByteBuffer buf] (let [x (int (.get buf))]
+  [_ ^ByteBuffer buf] (let [x (int (.get buf))]
                          (bit-and x (int 0xFF))))
 (defmethod write-binary ::uint8
-  [_ #^ByteBuffer buf x] (let [ix (int x)]
+  [_ ^ByteBuffer buf x] (let [ix (int x)]
                            (.put buf (byte (if (>= ix 0x80)
                                              (bit-or -0x80 ix)
                                              ix)))))
 
 (defmethod read-binary ::int16
-  [_ #^ByteBuffer buf] (.getShort buf))
+  [_ ^ByteBuffer buf] (.getShort buf))
 (defmethod write-binary ::int16
-  [_ #^ByteBuffer buf x] (.putShort buf (short x)))
+  [_ ^ByteBuffer buf x] (.putShort buf (short x)))
 (defmethod read-binary ::uint16
-  [_ #^ByteBuffer buf] (let [x (int (.getShort buf))]
+  [_ ^ByteBuffer buf] (let [x (int (.getShort buf))]
                          (bit-and x (int 0xFFFF))))
 (defmethod write-binary ::uint16
-  [_ #^ByteBuffer buf x] (.putShort buf (short (if (>= x 0x8000)
+  [_ ^ByteBuffer buf x] (.putShort buf (short (if (>= x 0x8000)
                                                  (bit-or -0x8000 x)
                                                  x))))
 
 (defmethod read-binary ::int32
-  [_ #^ByteBuffer buf] (.getInt buf))
+  [_ ^ByteBuffer buf] (.getInt buf))
 (defmethod write-binary ::int32
-  [_ #^ByteBuffer buf x] (.putInt buf (int x)))
+  [_ ^ByteBuffer buf x] (.putInt buf (int x)))
 (defmethod read-binary ::uint32
-  [_ #^ByteBuffer buf] (let [x (int (.getInt buf))]
+  [_ ^ByteBuffer buf] (let [x (int (.getInt buf))]
                          (bit-and x 0xFFFFFFFF)))
 (defmethod write-binary ::uint32
-  [_ #^ByteBuffer buf x] (.putInt buf (int (if (>= x 0x80000000)
+  [_ ^ByteBuffer buf x] (.putInt buf (int (if (>= x 0x80000000)
                                              (bit-or -0x80000000 x)
                                              x))))
 
 (defmethod read-binary ::int64
-  [_ #^ByteBuffer buf] (.getLong buf))
+  [_ ^ByteBuffer buf] (.getLong buf))
 (defmethod write-binary ::int64
-  [_ #^ByteBuffer buf x] (.putLong buf (long x)))
+  [_ ^ByteBuffer buf x] (.putLong buf (long x)))
 
 ;; must coerce to bigint to get rid of reflection warning
 (defmethod read-binary ::uint64
-  [_ #^ByteBuffer buf] (let [x (.getLong buf)]
+  [_ ^ByteBuffer buf] (let [x (.getLong buf)]
                          (bit-and (BigInteger/valueOf x) 0xFFFFFFFFFFFFFFFF)))
 (defmethod write-binary ::uint64
-  [_ #^ByteBuffer buf x] (.putLong buf (long (if (>= x 0x8000000000000000)
+  [_ ^ByteBuffer buf x] (.putLong buf (long (if (>= x 0x8000000000000000)
                                                (bit-or -0x8000000000000000 x)
                                                x))))
 
 (defmethod read-binary ::single-float
-  [_ #^ByteBuffer buf] (.getFloat buf))
+  [_ ^ByteBuffer buf] (.getFloat buf))
 (defmethod write-binary ::single-float
-  [_ #^ByteBuffer buf x] (.putFloat buf (float x)))
+  [_ ^ByteBuffer buf x] (.putFloat buf (float x)))
 
 (defmethod read-binary ::double-float
-  [_ #^ByteBuffer buf] (.getDouble buf))
+  [_ ^ByteBuffer buf] (.getDouble buf))
 (defmethod write-binary ::double-float
-  [_ #^ByteBuffer buf x] (.putDouble buf (double x)))
+  [_ ^ByteBuffer buf x] (.putDouble buf (double x)))
 
 
 ;;; pseudo-formats for selecting byte order within a format declaration
 
 (defmethod read-binary ::set-le-mode
-  [_ #^ByteBuffer buf] (.order buf ByteOrder/LITTLE_ENDIAN))
+  [_ ^ByteBuffer buf] (.order buf ByteOrder/LITTLE_ENDIAN))
 
 (defmethod write-binary ::set-le-mode
-  [_ #^ByteBuffer buf x] (.order buf ByteOrder/LITTLE_ENDIAN))
+  [_ ^ByteBuffer buf x] (.order buf ByteOrder/LITTLE_ENDIAN))
 
 (defmethod read-binary ::set-be-mode
-  [_ #^ByteBuffer buf] (.order buf ByteOrder/BIG_ENDIAN))
+  [_ ^ByteBuffer buf] (.order buf ByteOrder/BIG_ENDIAN))
 
 (defmethod write-binary ::set-be-mode
-  [_ #^ByteBuffer buf x] (.order buf ByteOrder/BIG_ENDIAN))
+  [_ ^ByteBuffer buf x] (.order buf ByteOrder/BIG_ENDIAN))
 
 
 (defn sym->kw [sym]
@@ -148,10 +148,14 @@
         gbuf (gensym "BUF")
         ginitargs (gensym "ARGS")]
     `(do
-       (defmethod read-binary ~namekw [~gtag ^ByteBuffer ~gbuf ~@ctx]
+       (defmethod read-binary ~namekw [~gtag ~(with-meta gbuf
+                                                {:tag java.nio.ByteBuffer})
+                                       ~@ctx]
          (let [~name {}]
            ~(make-reader name gtag gbuf body)))
-       (defmethod write-binary ~namekw [~gtag ^ByteBuffer ~gbuf ~name ~@ctx]
+       (defmethod write-binary ~namekw [~gtag ~(with-meta gbuf
+                                                 {:tag java.nio.ByteBuffer})
+                                        ~name ~@ctx]
          (let ~(vec (apply concat (collect-fields body name)))
            ~(make-writer name gtag gbuf body))))))
 
@@ -248,6 +252,13 @@
          (let [~(kw->sym tag) (~tag ~fmt-name)]
            ~remain)))))
 
+(defn skip-aux [^ByteBuffer buf ^Integer offset]
+  (.position buf (int (+ offset (.position buf)))))
+
+(defn align-aux [^ByteBuffer buf ^Integer align]
+  (.position buf (int (bit-and (bit-not (dec align))
+                               (+ (.position buf) (dec align))))))
+
 (defn- make-reader-1 [fmt-name gtag gbuf fld remain]
   (cond
     (or (keyword? (first fld)) (= (first fld) 'internal))
@@ -255,12 +266,12 @@
 
     (= (first fld) 'skip)
     (let [[count] (next fld)]
-      `(do (.position ~gbuf (int (+ ~count (.position ~gbuf)))) ~remain))
+      `(do (skip-aux ~gbuf ~count)
+         ~remain))
 
     (= (first fld) 'align)
     (let [[align] (next fld)]
-      `(do (.position ~gbuf (bit-and ~(bit-not (dec align))
-                                     (+ (.position ~gbuf) ~(dec align))))
+      `(do (align-aux ~gbuf ~align)
          ~remain))
 
     (= (first fld) 'if)
@@ -348,12 +359,12 @@
 
     (= (first fld) 'skip)
     (let [[count] (next fld)]
-      `(do (.position ~gbuf (int (+ ~count (.position ~gbuf)))) ~remain))
+      `(do (skip-aux ~gbuf ~count)
+         ~remain))
 
     (= (first fld) 'align)
     (let [[align] (next fld)]
-      `(do (.position ~gbuf (bit-and ~(bit-not (dec align))
-                                     (+ (.position ~gbuf) ~(dec align))))
+      `(do (align-aux ~gbuf ~align)
          ~remain))
 
     (= (first fld) 'if)

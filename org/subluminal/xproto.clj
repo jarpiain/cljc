@@ -34,3 +34,4 @@
 ;; Protocol extensions
 (load "xext/shape")
 (load "xext/bigreq")
+(load "xext/fixes")

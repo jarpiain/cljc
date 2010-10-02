@@ -173,14 +173,15 @@
   (let [^ByteBuffer buf (:buffer dpy)]
     (check-out-buf dpy)
     (let [pos (.position buf)]
-      (try
-        (bin/write-binary tag buf req)
-        (catch BufferOverflowException e
-          (.position buf (+ pos 2))
-          (let [siz (bin/read-binary ::card16 buf)]
-            (.position buf pos)
-            (flush-display dpy)
-            (bin/write-binary tag buf req)))))
+      (binding [*display* dpy]
+        (try
+          (bin/write-binary tag buf req)
+          (catch BufferOverflowException e
+            (.position buf (+ pos 2))
+            (let [siz (bin/read-binary ::card16 buf)]
+              (.position buf pos)
+              (flush-display dpy)
+              (bin/write-binary tag buf req))))))
     (update-in dpy [:next-serial] inc)))
 
 (defn request

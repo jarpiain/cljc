@@ -27,24 +27,26 @@
             err :first-error
             op :first-op
             :as info}
-            (query dpy ::query-extension {:name (name (name name-kw))})]
+            @(query dpy ::query-extension
+                    {:name (:name (*extensions* name-kw))})]
        (send dpy
              (fn [dpy]
                (-> dpy
-                   (assoc-in [:extensions] name-kw info)
+                   (assoc-in [:extensions name-kw] info)
                    (update-in [:event-codes] into
-                              (map (fn [k v] [(+ v evt) k])
+                              (map (fn [[k v]] [(+ v evt) k])
                                    (:event-codes (*extensions* name-kw))))
                    (update-in [:error-codes] into
-                              (map (fn [k v] [(+ v err) k])
+                              (map (fn [[k v]] [(+ v err) k])
                                    (:error-codes (*extensions* name-kw)))))))
        info))))
 
 ; ext/foo.clj:
 ;
 ; (def *extensions*
-;      (assoc *extensions* :FOO
-;             {:ops {0 ::create-foo 1 ::destroy-foo}
+;      (assoc *extensions* :foo
+;             {:name "FOO"
+               :ops {0 ::create-foo 1 ::destroy-foo}
 ;              :error-codes {::foo-error 0}
 ;              :event-codes {::foo-event 0}}))
 ;

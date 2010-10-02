@@ -3,21 +3,29 @@
 (def *reply-formats* {})
 
 (defmacro define-ext-op
-  ([op] (define-ext-op op nil))
-  ([op reply]
-   (let [[major minor len & body] op]
+  ([major op] `(define-ext-op ~major ~op nil))
+  ([major op reply]
+   (let [[minor len & body] op]
      `(do
         ~(when reply
            `(def *reply-formats*
                  (assoc *reply-formats*
                         ~minor
                         ~(first reply))))
-        `(bin/defbinary ~(bin/kw->sym minor)
-           [:maj ::card8 {:aux (-> *display* :extensions deref
-                                   ~major :op)}]
-           [:min ::card8 {:aux ~(-> *extensions* ~major :ops ~minor)}]
+        (bin/defbinary ~(bin/kw->sym minor)
+           [:maj ::card8 {:aux (get-in *display*
+                                       [:extensions ~major :major-opcode])}]
+           [:min ::card8 {:aux (get-in *extensions* [~major :ops ~minor])}]
            [:length ::card16 {:aux ~len}]
-           ~@body)))))
+           ~@body)
+        ~(when reply
+           (let [[minr [ff ftyp fopt] & body] reply
+                 gdet (gensym)
+                 lsym 'reply-length]
+             `(bin/defbinary [~(bin/kw->sym minr) ~gdet ~lsym]
+                [~ff ~ftyp ~(merge fopt {:transient gdet})]
+                ~@body)))))))
+
 
 (defmacro define-core-op
   ([op] `(define-core-op ~op nil))

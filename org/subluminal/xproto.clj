@@ -30,3 +30,6 @@
 (load "core/text")
 (load "core/colormap")
 (load "core/ext")
+
+;; Protocol extensions
+(load "xext/shape")

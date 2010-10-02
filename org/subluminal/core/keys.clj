@@ -202,3 +202,19 @@
     [:bell-duration ::card16]
     (skip 2)
     [:auto-repeats ::card8 {:times 32}]))
+
+(define-core-op
+  (::set-modifier-mapping (inc (/ (count (:keycodes set-modifier-mapping)) 4))
+    [:keycodes-per-modifier ::card8]
+    [:keycodes ::keycode {:times 0}])
+  (::set-modifier-mapping-reply
+    [:status ::card8 {:xenum {:success 0 :busy 1 :failed 2}}]
+    (skip 24)))
+
+(defire-core-op
+  (::get-modifier-mapping 1
+    (skip 1))
+  (::get-modifier-mapping-reply
+    [:keycodes-per-modifier ::card8]
+    (skip 24)
+    [:keycodes ::keycode {:times (* 8 keycodes-per-modifier)}))

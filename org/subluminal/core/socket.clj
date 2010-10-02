@@ -73,7 +73,7 @@
 
 (defn x-connect [port]
   (let [dpy (x-handshake (x-socket port)
-                         (ByteBuffer/allocate 10000))
+                         (ByteBuffer/allocateDirect 10000))
         agt (agent dpy)]
     (if (:status (meta dpy))
       (send agt assoc :inbuf (start-x-input agt))

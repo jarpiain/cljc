@@ -65,5 +65,9 @@
     (skip 20)))
 
 (define-core-op
+  (::bell 1
+    [:percent ::bin/int8]))
+
+(define-core-op
   (::no-operation 1
     (skip 1)))

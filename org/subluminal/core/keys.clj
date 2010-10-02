@@ -149,3 +149,56 @@
   ([evt] (translate-key *display* evt))
   ([dpy evt]
    (translate-keysym (keycode->keysym dpy evt))))
+
+;; Keyboard control
+
+(define-core-op
+  (::change-keyboard-control (+ 2 (count (:value-mask change-keyboard-control)))
+    (skip 1)
+    [:value-mask ::card32
+      {:bitmask {:key-click-percent 0
+                 :bell-percent 1
+                 :bell-pitch 2
+                 :bell-duration 3
+                 :led 4
+                 :led-mode 5
+                 :key 6
+                 :auto-repeat-mode 7}}]
+    (select value-mask
+      :key-click-percent
+      (do [:key-click-percent ::card8] (skip 3))
+
+      :bell-percent
+      (do [:bell-percent ::card8] (skip 3))
+
+      :bell-pitch
+      (do [:bell-pitch ::bin/int16] (skip 2))
+
+      :bell-duration
+      (do [:bell-duration ::bin/int16] (skip 2))
+
+      :led
+      (do [:led ::card8] (skip 3))
+
+      :led-mode
+      (do [:led-mode ::card8] (skip 3))
+
+      :key
+      (do [:key ::keycode] (skip 3))
+
+      :auto-repeat-mode
+      (do [:auto-repeat-mode ::card8 {:xenum {:off 0 :on 1 :default 2}}]
+        (skip 3)))))
+
+(define-core-op
+  (::get-keyboard-control 1
+    (skip 1))
+  (::get-keyboard-control-reply
+    [:global-auto-repeat ::card8]
+    [:led-mask ::card32]
+    [:key-click-percent ::card8]
+    [:bell-percent ::card8]
+    [:bell-pitch ::card16]
+    [:bell-duration ::card16]
+    (skip 2)
+    [:auto-repeats ::card8 {:times 32}]))

@@ -24,13 +24,13 @@
         (:protocol-major-version ::card16)
         (:protocol-minor-version ::card16)
         (:extra-data-len ::card16)
-        (:reason (::ascii reason-len))
+        (:reason [::ascii reason-len])
         (align 4))
 
     :authenticate
     (do (skip 5)
         (:extra-data-len ::card16)
-        (:reason (::ascii (* 4 extra-data-len))))
+        (:reason [::ascii (* 4 extra-data-len)]))
 
     :success
     (do (skip 1)
@@ -105,12 +105,12 @@
 
 (defn get-screen
   ([] (get-screen *display*))
-  ([dpy] (get (:screens dpy) 0)))
+  ([dpy] (get (:screens @dpy) 0)))
 
-(defn intern-atom [dpy k v]
-  (dosync
-    (commute (:atoms dpy) assoc k v)
-    (commute (:atoms-lookup dpy) assoc v k)))
+(defn- intern-atom-action [dpy k v]
+  (assoc dpy
+         :atoms (assoc (:atoms dpy) k v)
+         :atoms-lookup (assoc (:atoms-lookup dpy) v k)))
 
 (defn- gen-resource-id [base mask idx]
   (let [unit (bit-and (int mask)
@@ -120,40 +120,27 @@
 
 (defn alloc-id
   ([] (alloc-id *display*))
-  ([dpy] (let [idx (dosync (alter (:next-resource-id dpy) inc))]
-           (gen-resource-id (:resource-id-base dpy)
-                            (:resource-id-mask dpy)
-                            idx))))
+  ([dpy] (gen-resource-id (:resource-id-base dpy)
+                          (:resource-id-mask dpy)
+                          (:next-resource-id dpy))))
 
 (defn next-event [dpy]
-  (dosync
-    (ensure (:promised-events dpy))
-    (when-let [evts (seq (ensure (:events dpy)))]
-      (alter (:events dpy) pop)
-      (first evts))))
+  (.poll (:events @dpy)))
 
-(defn wait-event [dpy]
-  (let [p (promise)]
-    (dosync
-      (if-let [evt (next-event dpy)]
-        (deliver p evt)
-        (commute (:promised-events dpy) conj p))
-      p)))
+(defn wait-event
+  ([dpy] (.take (:events @dpy)))
+  ([dpy timeout]
+   (.poll (:events @dpy) timeout TimeUnit/MILLISECONDS)))
 
 (defn deliver-event [dpy evt]
-  (dosync
-    (ensure (:events dpy))
-    (if-let [ps (seq (ensure (:promised-events dpy)))]
-      (do (deliver (first ps) evt)
-          (alter (:promised-events dpy) pop))
-      (commute (:events dpy) conj evt))))
+  (.put (:events @dpy) evt))
 
 (defn deliver-reply [dpy serial reply]
-  (let [[fmt p :as expect] (get @(:replies dpy) serial)]
-    (if (seq? p)
-      (dosync (commute (-> dpy :replies) update-in [serial 1] rest))
-      (dosync (commute (-> dpy :replies) dissoc serial)))
+  (let [[fmt p :as expect] (get @(:replies @dpy) serial)]
     (deliver (if (seq? p)
                (first p)
                p)
-             reply)))
+             reply)
+    (if (seq? p)
+      (dosync (alter (:replies @dpy) update-in [serial 1] rest))
+      (dosync (alter (:replies @dpy) dissoc serial)))))

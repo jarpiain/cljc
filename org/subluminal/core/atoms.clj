@@ -24,27 +24,27 @@
     [:name [::ascii name-length]]
     (align 4)))
 
-(defn x-intern
-  ([kw] (x-intern *display* kw))
+(defn intern-atom
+  ([kw] (intern-atom *display* kw))
   ([dpy kw]
-   (if-let [at (get @(:atoms dpy) kw)]
+   (if-let [at (get (:atoms @dpy) kw)]
      at
-     (let [reply @(wait-x dpy ::intern-atom
-                          {:only-if-exists 0
-                           :name (name kw)})]
+     (let [reply @(query dpy ::intern-atom
+                         {:only-if-exists 0
+                          :name (name kw)})]
        (when reply
-         (intern-atom dpy kw (:atom reply))
+         (send dpy intern-atom-action kw (:atom reply))
          (:atom reply))))))
 
-(defn x-atom
-  ([a] (x-atom *display* a))
+(defn atom-name
+  ([a] (atom-name *display* a))
   ([dpy a]
-   (if-let [kw (get @(:atoms-lookup dpy) a)]
+   (if-let [kw (get (:atoms-lookup @dpy) a)]
      kw
-     (let [reply @(wait-x dpy ::get-atom-name {:atom a})]
+     (let [reply @(query dpy ::get-atom-name {:atom a})]
        (when reply
          (let [kw (keyword (:name reply))]
-           (intern-atom dpy kw a)
+           (send dpy intern-atom-action kw a)
            kw))))))
 
 ;; -- window properties
@@ -111,20 +111,20 @@
 (defn get-properties
   ([wnd] (get-properties *display* wnd))
   ([dpy wnd]
-   (let [reply @(wait-x dpy ::list-properties {:window wnd})]
+   (let [reply @(query dpy ::list-properties {:window wnd})]
      (when reply
-       (let [keys (doall (map #(x-atom dpy %) (:atoms reply)))
+       (let [keys (doall (map #(atom-name dpy %) (:atoms reply)))
              typs (doall
-                    (map #(-> (wait-x dpy ::get-property
+                    (map #(-> (query dpy ::get-property
                                   {:delete 0
                                    :window wnd
-                                   :property (x-intern dpy %)
+                                   :property (intern-atom dpy %)
                                    :type 0
                                    :long-offset 0
                                    :long-length 0})
                               deref :type)
                          keys))
-             vals (doall (map (partial x-atom dpy) typs))]
+             vals (doall (map (partial atom-name dpy) typs))]
          (zipmap keys vals))))))
 
 (defmulti interpret-property :type)

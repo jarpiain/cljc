@@ -51,7 +51,7 @@
 (define-core-op
   (::create-cursor 8
     (skip 1)
-    [:cid ::cursor {:aux *alloc-resource*}]
+    [:id ::cursor]
     [:source ::pixmap]
     [:mask ::pixmap]
     [:fore-red ::card16]
@@ -66,7 +66,7 @@
 (define-core-op
   (::create-glyph-cursor 8
     (skip 1)
-    [:cid ::cursor {:aux *alloc-resource*}]
+    [:id ::cursor]
     [:source-font ::font]
     [:mask-font ::font]
     [:source-char ::card16]

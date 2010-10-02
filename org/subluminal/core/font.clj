@@ -3,7 +3,7 @@
 (define-core-op
   (::open-font (+ 3 (/ (bin/pad4 (count (:name open-font))) 4))
     (skip 1)
-    [:fid ::font {:aux *alloc-resource*}]
+    [:id ::font]
     [:name-len ::card16 {:aux (count (:name open-font))}]
     (skip 2)
     [:name [::ascii (count (:name open-font))]]

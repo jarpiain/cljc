@@ -3,7 +3,7 @@
 (define-core-op
   (::create-colormap 4
     [:alloc ::card8 {:xenum {:none 0 :all 1}}]
-    [:mid ::colormap {:aux *alloc-resource*}]
+    [:id ::colormap]
     [:window ::window]
     [:visual ::visual-id]))
 
@@ -15,7 +15,7 @@
 (define-core-op
   (::copy-colormap-and-free 3
     (skip 1)
-    [:mid ::colormap {:aux *alloc-resource*}]
+    [:id ::colormap]
     [:source ::colormap]))
 
 (define-core-op

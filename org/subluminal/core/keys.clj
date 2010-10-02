@@ -50,14 +50,14 @@
    (let [min-k (:min-keycode dpy)
          max-k (:max-keycode dpy)
          count (inc (- max-k min-k))
-         kmap @(wait-x dpy ::get-keyboard-mapping
-                       {:first-keycode min-k
-                        :count count})
+         kmap @(query dpy ::get-keyboard-mapping
+                      {:first-keycode min-k
+                       :count count})
          psiz (:keysyms-per-keycode kmap)
          vmap (into [] (concat (take min-k (repeat []))
                                (map vec (partition psiz (:keysyms kmap)))))]
-     (dosync
-       (ref-set (:keymap dpy) vmap)))))
+     (send dpy assoc :keymap vmap)
+     vmap)))
 
 (defn get-column [code state]
   (if (state :shift)
@@ -69,7 +69,7 @@
   ([dpy evt]
    (let [row (:detail evt)
          column (get-column row (:state evt))]
-     (get-in @(:keymap dpy) [row column]))))
+     (get-in (:keymap @dpy) [row column]))))
 
 (def *control-keysyms*
      {0xFF08 :backspace

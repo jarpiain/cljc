@@ -75,7 +75,7 @@
 (define-core-op
   (::create-gc (+ 4 (count (:value-mask create-gc)))
     (skip 1)
-    [:cid ::gcontext {:aux *alloc-resource*}]
+    [:id ::gcontext]
     [:drawable ::drawable]
     [:value-mask ::gc-valuemask]
     [:values [::gc-values value-mask]]))
@@ -92,18 +92,18 @@
   ([opts] (create-gc *display* (:root (get-screen)) opts))
   ([wnd opts] (create-gc *display* wnd opts))
   ([dpy wnd opts]
-   (alloc-x dpy ::create-gc
-            {:drawable wnd
-             :value-mask (set (keys opts))
-             :values opts})))
+   (alloc dpy ::create-gc
+          {:drawable wnd
+           :value-mask (set (keys opts))
+           :values opts})))
 
 (defn change-gc
   ([gc opts] (change-gc *display* gc opts))
   ([dpy gc opts]
-   (send-x dpy ::change-gc
-           {:gc gc
-            :value-mask (set (keys opts))
-            :values opts})))
+   (request dpy ::change-gc
+            {:gc gc
+             :value-mask (set (keys opts))
+             :values opts})))
 
 (define-core-op
   (::copy-gc 4

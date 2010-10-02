@@ -21,23 +21,24 @@
   "name should be an unqualified keyword"
   ([name-kw] (query-extension *display* name-kw))
   ([dpy name-kw]
-   (if-let [info (-> dpy :extensions deref name-kw)]
+   (if-let [info (-> @dpy :extensions name-kw)]
      info
      (let [{evt :first-event 
             err :first-error
             op :first-op
             :as info}
-            (wait-x dpy ::query-extension {:name (name (name name-kw))})]
-       (dosync
-         (alter (-> dpy :extensions)
-                assoc name-kw info)
-         (alter (-> dpy :event-codes)
-                into (map (fn [k v] [(+ v evt) k])
-                          (:error-codes (*extensions* name-kw))))
-         (alter (-> dpy :error-codes)
-                into (map (fn [k v] [(+ v err) k])
-                          (:error-codes (*extensions* name-kw))))
-         info)))))
+            (query dpy ::query-extension {:name (name (name name-kw))})]
+       (send dpy
+             (fn [dpy]
+               (-> dpy
+                   (assoc-in [:extensions] name-kw info)
+                   (update-in [:event-codes] into
+                              (map (fn [k v] [(+ v evt) k])
+                                   (:event-codes (*extensions* name-kw))))
+                   (update-in [:error-codes] into
+                              (map (fn [k v] [(+ v err) k])
+                                   (:error-codes (*extensions* name-kw)))))))
+       info))))
 
 ; ext/foo.clj:
 ;

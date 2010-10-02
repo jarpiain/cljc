@@ -5,7 +5,7 @@
 (define-core-op
   (::create-pixmap 4
     [:depth ::card8]
-    [:pid *alloc-resource*]
+    [:id ::pixmap]
     [:drawable ::drawable]
     [:width ::card16]
     [:height ::card16]))

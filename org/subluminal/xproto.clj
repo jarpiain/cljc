@@ -3,6 +3,7 @@
   (:import (java.nio ByteBuffer ByteOrder)
 	   (java.nio.channels SocketChannel)
 	   (java.net InetSocketAddress)
+     (java.util.concurrent LinkedBlockingQueue TimeUnit)
 	   (clojure.lang PersistentQueue))
   (:require (org.subluminal [binfmt :as bin])))
 

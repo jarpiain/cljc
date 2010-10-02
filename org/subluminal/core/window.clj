@@ -35,7 +35,7 @@
 (define-core-op
   (::create-window (+ 8 (count (:value-mask create-window)))
     [:depth ::card8]
-    [:id ::window {:aux *alloc-resource*}]
+    [:id ::window]
     [:parent ::window]
     [:x ::bin/int16]
     [:y ::bin/int16]
@@ -55,30 +55,30 @@
   ([dpy args vals]
    (let [vals (merge {:background-pixel (:white-pixel (get-screen dpy))}
                       vals)]
-     (alloc-x dpy ::create-window
-              (merge {:parent (:root (get-screen dpy))
-                      :depth (:root-depth (get-screen dpy))
-                      :border-width 0
-                      :class :input-output
-                      :visual :copy-from-parent
-                      :value-mask (set (keys vals))
-                      :values vals}
-                     args)))))
+     (alloc dpy ::create-window
+            (merge {:parent (:root (get-screen dpy))
+                    :depth (:root-depth (get-screen dpy))
+                    :border-width 0
+                    :class :input-output
+                    :visual :copy-from-parent
+                    :value-mask (set (keys vals))
+                    :values vals}
+                   args)))))
 
 (defn create-input-window
   ([args vals] (create-input-window *display* args vals))
   ([dpy args vals]
    (let [vals (merge {:override-redirect 1}
                      vals)]
-     (alloc-x dpy ::create-window
-              (merge {:parent (:root (get-screen dpy))
-                      :depth 0
-                      :border-width 0
-                      :class :input-only
-                      :visual :copy-from-parent
-                      :value-mask (set (keys vals))
-                      :values vals}
-                      args)))))
+     (alloc dpy ::create-window
+            (merge {:parent (:root (get-screen dpy))
+                    :depth 0
+                    :border-width 0
+                    :class :input-only
+                    :visual :copy-from-parent
+                    :value-mask (set (keys vals))
+                    :values vals}
+                    args)))))
 
 (define-core-op
   (::change-window-attributes

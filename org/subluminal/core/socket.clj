@@ -28,22 +28,22 @@
     (if (= (:status result) :success)
       (assoc (with-meta (:display result) {:status :success})
              ;; altered upon loading extensions
-             :op-codes (ref {})
-             :error-codes (ref {})
-             :event-codes (ref +core-events+)
+             :extensions {}
+             :op-codes {}
+             :error-codes {}
+             :event-codes +core-events+
 
-             :next-resource-id (ref 0)
-             :atoms (ref +predefined-atoms+)
-             :atoms-lookup (ref (bin/invert-map +predefined-atoms+))
-             :next-serial (ref 0)
+             :next-resource-id 0
+             :atoms +predefined-atoms+
+             :atoms-lookup (bin/invert-map +predefined-atoms+)
+             :next-serial 1
 
-             :events (ref (PersistentQueue/EMPTY))
-             :promised-events (ref (PersistentQueue/EMPTY))
+             :events (LinkedBlockingQueue.)
              :last-error (ref nil)
 
-             :keymap (ref nil)
+             :keymap nil
              :replies (ref {})
-             :buffer (agent buf)
+             :buffer buf
              :channel chan)
       result)))
 
@@ -53,34 +53,40 @@
 
 (defn x-connect [port]
   (let [dpy (x-handshake (x-socket port)
-                         (ByteBuffer/allocate 10000))]
+                         (ByteBuffer/allocate 10000))
+        agt (agent dpy)]
     (if (:status (meta dpy))
-      (assoc dpy :inbuf (start-x-input dpy))
+      (send agt assoc :inbuf (start-x-input agt))
       dpy)))
 
 ;; Terminate connection
 
-(defn x-close
-  ([] (x-close *display*))
-  ([dpy] (.close (:channel dpy))))
+(defn x-close [dpy]
+  (.close (:channel dpy)))
 
 ;; Input agent actions
 
 (declare deliver-reply deliver-event)
 
+(defn- clear-buffer [buf chan]
+  (when (< (.remaining buf) 32)
+    (let [arr (make-array Byte/TYPE 32)
+          siz (.remaining buf)]
+      (.get buf arr 0 siz)
+      (.clear buf)
+      (.put buf arr 0 siz)
+      (.read chan buf)
+      (.flip buf))))
+
 (defn- x-input-loop [buf chan dpy]
   (when (.isOpen chan)
     (send-off *agent* x-input-loop chan dpy)
-    (when (zero? (.remaining buf))
-      (.clear buf)
-      (.read chan buf)
-      (.flip buf))
+    (clear-buffer buf chan)
     (let [reply (bin/read-binary ::x-reply buf)]
       (case (:category reply)
         :reply
-        (let [[fmt p :as expect] (dosync
-                                   (get @(:replies dpy)
-                                        (:serial reply)))
+        (let [[fmt p :as expect] (get @(:replies @dpy)
+                                      (:serial reply))
                szdiff (- (.capacity buf)
                          (-> reply :length (* 4) (+ 32)))
                bigbuf (if (>= szdiff 0) buf
@@ -106,17 +112,17 @@
 
         :error
         (let [serial (get-in reply [:err :serial])
-              [fmt p :as expect] (get @(:replies dpy) serial)]
+              [fmt p :as expect] (get @(:replies @dpy) serial)]
           (println "Was expecting reply: " fmt)
           (println "Got error " (:err reply))
           (if expect
             (deliver-reply dpy serial nil))
-          (dosync (ref-set (:last-error dpy)
+          (dosync (ref-set (:last-error @dpy)
                            (:err reply)))
           buf)
 
         ; event
-        (let [code (@(:event-codes dpy) (:category reply))
+        (let [code ((:event-codes @dpy) (:category reply))
               evt (bin/read-binary code buf)]
           (do (deliver-event dpy evt) buf))))))
 
@@ -125,64 +131,59 @@
         ag (agent buf)]
     (.order buf ByteOrder/LITTLE_ENDIAN)
     (.flip buf) ; limit := 0 -> force read from socket
-    (send-off ag x-input-loop (:channel dpy) dpy)
+    (send-off ag x-input-loop (:channel @dpy) dpy)
     ag))
 
 ;; Send general requests
 
-(defn send-x
-  ([tag req] (send-x *display* tag req))
+(defn- request-action [dpy tag req]
+  (let [buf (:buffer dpy)]
+    (.clear buf)
+    (bin/write-binary tag buf req)
+    (.flip buf)
+    (.write (:channel dpy) buf)
+    (update-in dpy [:next-serial] inc)))
+
+(defn request
+  ([tag req] (request *display* tag req))
   ([dpy tag req]
-   (dosync
-     (send-off (:buffer dpy)
-               (fn [buf tag req chan]
-                 (.clear buf)
-                 (bin/write-binary tag buf req)
-                 (.flip buf)
-                 (.write chan buf)
-                 buf)
-               tag req (:channel dpy))
-     (alter (:next-serial dpy) inc))))
+   (send-off dpy request-action tag req)))
 
-(declare *alloc-resource* *reply-formats*)
-
-(defn alloc-x 
-  ([tag req] (alloc-x *display* tag req))
+(defn alloc
+  ([tag req] (alloc *display* tag req))
   ([dpy tag req]
-     (let [resid (alloc-id dpy)]
-       (dosync
-         (send-off (:buffer dpy)
-                   (fn [buf tag req chan aid]
-                     (.clear buf)
-                     (binding [*alloc-resource* aid]
-                       (bin/write-binary tag buf req))
-                     (.flip buf)
-                     (.write chan buf)
-                     buf)
-                   tag req (:channel dpy) resid)
-         (alter (:next-serial dpy) inc))
-       resid)))
+   (send-off dpy
+     (fn [dpy]
+       (let [aid (alloc-id dpy)]
+         (update-in
+           (request-action dpy tag (merge req {:id aid}))
+           [:next-resource-id] inc))))))
 
-(defn wait-x
-  ([tag req] (wait-x *display* tag req))
+(declare *reply-formats*)
+
+(defn query
+  ([tag req] (query *display* tag req))
   ([dpy tag req]
      (if-let [rply (*reply-formats* tag)]
-       (dosync
-         (let [serial (send-x dpy tag req)
-               p (promise)]
-           (alter (:replies dpy) assoc (bit-and 0xFFFF serial) [rply p])
-           p))
+       (let [p (promise)]
+         (send-off dpy
+           (fn [dpy]
+             (dosync
+               (alter (:replies dpy)
+                      assoc (bit-and 0xFFFF (:next-serial dpy)) [rply p]))
+             (request-action dpy tag req)))
+         p)
        (throw (IllegalArgumentException.
                 (str "No reply format defined for " tag))))))
 
-(defn wait-more-x
-  ([tag req] (wait-more-x *display* tag req))
-  ([dpy tag req]
-     (if-let [rply (*reply-formats* tag)]
-       (dosync
-         (let [serial (send-x dpy tag req)
-               ps (repeatedly promise)]
-           (alter (:replies dpy) assoc (bit-and 0xFFFF serial) [rply ps])
-           ps))
-       (throw (IllegalArgumentException.
-                (str "No reply format defined for " tag))))))
+;(defn wait-more-x
+;  ([tag req] (wait-more-x *display* tag req))
+;  ([dpy tag req]
+;     (if-let [rply (*reply-formats* tag)]
+;       (dosync
+;         (let [serial (send-x dpy tag req)
+;               ps (repeatedly promise)]
+;           (alter (:replies dpy) assoc (bit-and 0xFFFF serial) [rply ps])
+;           ps))
+;       (throw (IllegalArgumentException.
+;                (str "No reply format defined for " tag))))))

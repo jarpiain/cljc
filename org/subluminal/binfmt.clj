@@ -37,10 +37,14 @@
 (defn lookup-writer [tag]
   (get (lookup tag) :writer))
 
-(defn read-binary [tag buf & more]
+(defn read-binary 
+  "Tries to parse binary data from a ByteBuffer in the specified format"
+  [tag buf & more]
   (apply (lookup-reader tag) buf more))
 
-(defn write-binary [tag buf obj & more]
+(defn write-binary 
+  "Writes a clojure data structure into a ByteBuffer in the specified format"
+  [tag buf obj & more]
   (apply (lookup-writer tag) buf obj more))
 
 (defmacro defprimitive [tag [buf obj & args] rd wr]
@@ -63,17 +67,6 @@
                             :writer (fn ~@wr-source)})
       `(bind-tag! ~keytag (fn ~@rd-source) (fn ~@wr-source)))))
 
-(defprimitive ^{:inline true} int8 [buf ^Number obj]
-  (.get buf)
-  (.put buf (byte obj)))
-
-(defprimitive uint8 [buf ^Number obj]
-  (let [b (int (.get buf))]
-    (bit-and b 0xFF))
-  (let [ub (int obj)
-        b (byte (if (> ub 0x7F) (bit-or ub -0x80) ub))]
-    (.put buf b)))
-
 (defn buffer-wrap
   "Allocates a ByteBuffer wrapping a seq of (unsigned) bytes"
   [byte-seq]
@@ -89,16 +82,6 @@
     (take n (map #(if (< % 0) (+ % 256) %)
 		 (seq (.array buf))))))
 
-(comment
-(defmulti read-binary
-  "Tries to parse binary data from a ByteBuffer in the specified format"
-  (fn [tag & _] tag))
-
-(defmulti write-binary
-  "Writes a clojure data structure into a ByteBuffer in the specified
-  binary format"
-  (fn [tag & _] tag)))
-
 (defn parse-file [tag filename & more]
   (let [file (FileInputStream. (str filename))
         chan (.getChannel file)
@@ -113,88 +96,76 @@
 
 ;;; pseudo-format for fields that should not be serialized
 
-(comment
-(defmethod read-binary ::null [_ buf] nil)
-(defmethod write-binary ::null [_ buf obj])
+(defprimitive ^{:inline true} null [buf obj]
+  nil
+  nil)
 
 ;;; primitive types
 
-(defmethod read-binary ::int8
-  [_ ^ByteBuffer buf] (.get buf))
-(defmethod write-binary ::int8
-  [_ ^ByteBuffer buf x] (.put buf (byte x)))
-(defmethod read-binary ::uint8
-  [_ ^ByteBuffer buf] (let [x (int (.get buf))]
-                         (bit-and x (int 0xFF))))
-(defmethod write-binary ::uint8
-  [_ ^ByteBuffer buf x] (let [ix (int x)]
-                           (.put buf (byte (if (>= ix 0x80)
-                                             (bit-or -0x80 ix)
-                                             ix)))))
+(defprimitive ^{:inline true} int8 [buf ^Number obj]
+  (.get buf)
+  (.put buf (byte obj)))
 
-(defmethod read-binary ::int16
-  [_ ^ByteBuffer buf] (.getShort buf))
-(defmethod write-binary ::int16
-  [_ ^ByteBuffer buf x] (.putShort buf (short x)))
-(defmethod read-binary ::uint16
-  [_ ^ByteBuffer buf] (let [x (int (.getShort buf))]
-                         (bit-and x (int 0xFFFF))))
-(defmethod write-binary ::uint16
-  [_ ^ByteBuffer buf x] (.putShort buf (short (if (>= x 0x8000)
-                                                 (bit-or -0x8000 x)
-                                                 x))))
+(defprimitive uint8 [buf ^Number obj]
+  (let [b (int (.get buf))]
+    (bit-and b 0xFF))
+  (let [ub (int obj)
+        b (byte (if (>= ub 0x80) (bit-or ub -0x80) ub))]
+    (.put buf b)))
 
-(defmethod read-binary ::int32
-  [_ ^ByteBuffer buf] (.getInt buf))
-(defmethod write-binary ::int32
-  [_ ^ByteBuffer buf x] (.putInt buf (int x)))
-(defmethod read-binary ::uint32
-  [_ ^ByteBuffer buf] (let [x (int (.getInt buf))]
-                         (bit-and x 0xFFFFFFFF)))
-(defmethod write-binary ::uint32
-  [_ ^ByteBuffer buf x] (.putInt buf (int (if (>= x 0x80000000)
-                                             (bit-or -0x80000000 x)
-                                             x))))
+(defprimitive ^{:inline true} int16 [buf ^Number obj]
+  (.getShort buf)
+  (.putShort buf (short obj)))
 
-(defmethod read-binary ::int64
-  [_ ^ByteBuffer buf] (.getLong buf))
-(defmethod write-binary ::int64
-  [_ ^ByteBuffer buf x] (.putLong buf (long x)))
+(defprimitive uint16 [buf ^Number obj]
+  (let [x (int (.getShort buf))]
+    (bit-and x (int 0xFFFF)))
+  (let [us (int obj)
+        s (short (if (>= us 0x8000) (bit-or us -0x8000) us))]
+    (.putShort buf s)))
+
+(defprimitive ^{:inline true} int32 [buf ^Number obj]
+  (.getInt buf)
+  (.putInt buf (int obj)))
+
+(defprimitive uint32 [buf ^Number obj]
+  (let [x (int (.getInt buf))]
+    (bit-and x 0xFFFFFFFF))
+  (let [i (int (if (>= obj 0x80000000)
+                 (bit-or -0x80000000 obj)
+                 obj))]
+    (.putInt buf i)))
+
+(defprimitive ^{:inline true} int64 [buf ^Number obj]
+  (.getLong buf)
+  (.putLong buf (long obj)))
 
 ;; must coerce to bigint to get rid of reflection warning
-(defmethod read-binary ::uint64
-  [_ ^ByteBuffer buf] (let [x (.getLong buf)]
-                         (bit-and (BigInteger/valueOf x) 0xFFFFFFFFFFFFFFFF)))
-(defmethod write-binary ::uint64
-  [_ ^ByteBuffer buf x] (.putLong buf (long (if (>= x 0x8000000000000000)
-                                               (bit-or -0x8000000000000000 x)
-                                               x))))
+(defprimitive uint64 [buf ^Number obj]
+  (let [x (.getLong buf)]
+    (bit-and (BigInteger/valueOf x) 0xFFFFFFFFFFFFFFFF))
+  (let [ll (long (if (>= obj 0x8000000000000000)
+                   (bit-or -0x8000000000000000 obj)
+                   obj))]
+    (.putLong buf ll)))
 
-(defmethod read-binary ::single-float
-  [_ ^ByteBuffer buf] (.getFloat buf))
-(defmethod write-binary ::single-float
-  [_ ^ByteBuffer buf x] (.putFloat buf (float x)))
+(defprimitive ^{:inline true} single-float [buf ^Number obj]
+  (.getFloat buf)
+  (.putFloat buf (float obj)))
 
-(defmethod read-binary ::double-float
-  [_ ^ByteBuffer buf] (.getDouble buf))
-(defmethod write-binary ::double-float
-  [_ ^ByteBuffer buf x] (.putDouble buf (double x)))
-
+(defprimitive ^{:inline true} double-float [buf ^Number obj]
+  (.getDouble buf)
+  (.putDouble buf (double obj)))
 
 ;;; pseudo-formats for selecting byte order within a format declaration
 
-(defmethod read-binary ::set-le-mode
-  [_ ^ByteBuffer buf] (.order buf ByteOrder/LITTLE_ENDIAN))
+(defprimitive ^{:inline true} set-le-mode [buf _]
+  (.order buf ByteOrder/LITTLE_ENDIAN)
+  (.order buf ByteOrder/LITTLE_ENDIAN))
 
-(defmethod write-binary ::set-le-mode
-  [_ ^ByteBuffer buf x] (.order buf ByteOrder/LITTLE_ENDIAN))
-
-(defmethod read-binary ::set-be-mode
-  [_ ^ByteBuffer buf] (.order buf ByteOrder/BIG_ENDIAN))
-
-(defmethod write-binary ::set-be-mode
-  [_ ^ByteBuffer buf x] (.order buf ByteOrder/BIG_ENDIAN)))
-
+(defprimitive ^{:inline true} set-be-mode [buf _]
+  (.order buf ByteOrder/BIG_ENDIAN)
+  (.order buf ByteOrder/BIG_ENDIAN))
 
 (defn kw->sym [kw]
   (symbol (name kw)))

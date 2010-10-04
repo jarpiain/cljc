@@ -149,12 +149,12 @@
         ginitargs (gensym "ARGS")]
     `(do
        (defmethod read-binary ~namekw [~gtag ~(with-meta gbuf
-                                                {:tag java.nio.ByteBuffer})
+                                                {:tag `ByteBuffer})
                                        ~@ctx]
          (let [~name {}]
            ~(make-reader name gtag gbuf body)))
        (defmethod write-binary ~namekw [~gtag ~(with-meta gbuf
-                                                 {:tag java.nio.ByteBuffer})
+                                                 {:tag `ByteBuffer})
                                         ~name ~@ctx]
          (let ~(vec (apply concat (collect-fields body name)))
            ~(make-writer name gtag gbuf body))))))
@@ -252,13 +252,6 @@
          (let [~(kw->sym tag) (~tag ~fmt-name)]
            ~remain)))))
 
-(defn skip-aux [^ByteBuffer buf ^Integer offset]
-  (.position buf (int (+ offset (.position buf)))))
-
-(defn align-aux [^ByteBuffer buf ^Integer align]
-  (.position buf (int (bit-and (bit-not (dec align))
-                               (+ (.position buf) (dec align))))))
-
 (defn- make-reader-1 [fmt-name gtag gbuf fld remain]
   (cond
     (or (keyword? (first fld)) (= (first fld) 'internal))
@@ -266,12 +259,16 @@
 
     (= (first fld) 'skip)
     (let [[count] (next fld)]
-      `(do (skip-aux ~gbuf ~count)
-         ~remain))
+      `(do (.position ~gbuf
+                      (int (+ ~count (.position ~gbuf))))
+            ~remain))
 
     (= (first fld) 'align)
     (let [[align] (next fld)]
-      `(do (align-aux ~gbuf ~align)
+      `(do (.position ~gbuf
+                      (int (bit-and ~(bit-not (dec align))
+                                    (+ (.position ~gbuf)
+                                       ~(dec align)))))
          ~remain))
 
     (= (first fld) 'if)
@@ -359,12 +356,17 @@
 
     (= (first fld) 'skip)
     (let [[count] (next fld)]
-      `(do (skip-aux ~gbuf ~count)
+      `(do (.position ~gbuf
+                      (+ ~count
+                         (.position ~gbuf)))
          ~remain))
 
     (= (first fld) 'align)
     (let [[align] (next fld)]
-      `(do (align-aux ~gbuf ~align)
+      `(do (.position ~gbuf
+                      (int (bit-and ~(bit-not (dec align))
+                                    (+ ~(dec align)
+                                       (.position ~gbuf)))))
          ~remain))
 
     (= (first fld) 'if)

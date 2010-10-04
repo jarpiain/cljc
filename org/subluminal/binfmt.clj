@@ -1,13 +1,77 @@
 (ns org.subluminal.binfmt
   (:refer-clojure)
-  (:import (java.nio ByteBuffer ByteOrder)))
+  (:import (java.nio ByteBuffer ByteOrder)
+           (clojure.lang Var)))
 
-; skip if cond case do select
-
-;(use ['clojure.contrib.macro-utils :only '(symbol-macrolet)])
 (import 'java.io.FileInputStream
         'java.nio.channels.FileChannel
         'java.nio.channels.FileChannel$MapMode)
+
+(defn sym->kw [sym]
+  (keyword (-> *ns* ns-name name)
+           (-> sym name)))
+
+(def *known-types* (atom {}))
+
+(defn- lookup [tag]
+  (swap! *known-types*
+         (fn [ts]
+           (if (contains? ts tag)
+             ts
+             (assoc ts tag {:reader (Var/create)
+                            :writer (Var/create)}))))
+  (get @*known-types* tag))
+
+(defn bind-tag! [tag rd wr]
+  (let [{rd-var :reader wr-var :writer} (lookup tag)]
+    (.bindRoot rd-var rd)
+    (.bindRoot wr-var wr)))
+
+(defn redef-tag! [tag val]
+  (swap! *known-types* assoc tag val))
+
+(defn- lookup-reader [tag]
+  (get (lookup tag) :reader))
+
+(defn- lookup-writer [tag]
+  (get (lookup tag) :writer))
+
+(defn read-bainary [tag buf & more]
+  (apply (lookup-reader tag) buf more))
+
+(defn write-bainary [tag buf obj & more]
+  (apply (lookup-writer tag) buf obj more))
+
+(defmacro defprimitive [tag [buf obj & args] rd wr]
+  (let [keytag (sym->kw tag)
+        {inline? :inline} (meta tag)
+        rd-source `(~(apply vector
+                            (with-meta buf {:tag `ByteBuffer})
+                            args)
+                    ~rd)
+        wr-source `(~(apply vector
+                            (with-meta buf {:tag `ByteBuffer})
+                            obj
+                            args)
+                    ~wr)]
+    (if inline?
+      `(redef-tag! ~keytag {:inline true
+                            :reader-source '~rd-source
+                            :writer-source '~wr-source
+                            :reader (fn ~@rd-source)
+                            :writer (fn ~@wr-source)})
+      `(bind-tag! ~keytag (fn ~@rd-source) (fn ~@wr-source)))))
+
+(defprimitive ^{:inline true} int8 [buf ^Number obj]
+  (.get buf)
+  (.put buf (byte obj)))
+
+(defprimitive uint8 [buf ^Number obj]
+  (let [b (long (.get buf))]
+    (bit-and b 0xFF))
+  (let [ub (long obj)
+        b (byte (if (> ub 0x7F) (bit-or ub -0x80) ub))]
+    (.put buf b)))
 
 (defn buffer-wrap
   "Allocates a ByteBuffer wrapping a seq of (unsigned) bytes"
@@ -129,9 +193,6 @@
   [_ ^ByteBuffer buf x] (.order buf ByteOrder/BIG_ENDIAN))
 
 
-(defn sym->kw [sym]
-  (keyword (-> *ns* ns-name name)
-           (-> sym name)))
 
 (defn kw->sym [kw]
   (symbol (name kw)))

@@ -24,7 +24,7 @@
   (get @*known-types* tag))
 
 (defn bind-tag! [tag rd wr]
-  (let [{rd-var :reader wr-var :writer} (lookup tag)]
+  (let [{^Var rd-var :reader ^Var wr-var :writer} (lookup tag)]
     (.bindRoot rd-var rd)
     (.bindRoot wr-var wr)))
 
@@ -77,7 +77,7 @@
 
 (defn buffer-unwrap
   "Returns the seq of (unsigned) bytes in a ByteBuffer"
-  [buf]
+  [^ByteBuffer buf]
   (let [n (.limit buf)]
     (take n (map #(if (< % 0) (+ % 256) %)
 		 (seq (.array buf))))))
@@ -156,6 +156,68 @@
 (defprimitive ^{:inline true} double-float [buf ^Number obj]
   (.getDouble buf)
   (.putDouble buf (double obj)))
+
+;;; Primitive arrays
+
+(defprimitive ^{:inline true} byte-array [buf ^"[B" obj ^Number len]
+  (let [a (byte-array len)]
+    (.get buf a) a)
+  (.put buf obj))
+
+(defprimitive short-array [buf ^"[S" obj ^Number len]
+  (let [a (short-array len)
+        sb (.asShortBuffer buf)]
+    (.get sb a)
+    (.position buf (+ (* 2 (alength a)) (.position buf)))
+    a)
+  (let [sb (.asShortBuffer buf)]
+    (.put sb obj)
+    (.position buf (+ (* 2 (alength obj))
+                      (.position buf)))))
+
+(defprimitive int-array [buf ^"[I" obj ^Number len]
+  (let [a (int-array len)
+        ib (.asIntBuffer buf)]
+    (.get ib a)
+    (.position buf (+ (* 4 (alength a)) (.position buf)))
+    a)
+  (let [ib (.asIntBuffer buf)]
+    (.put ib obj)
+    (.position buf (+ (* 4 (alength obj))
+                      (.position buf)))))
+
+(defprimitive long-array [buf ^"[J" obj ^Number len]
+  (let [a (long-array len)
+        lb (.asLongBuffer buf)]
+    (.get lb a)
+    (.position buf (+ (* 8 (alength a)) (.position buf)))
+    a)
+  (let [lb (.asLongBuffer buf)]
+    (.put lb obj)
+    (.position buf (+ (* 8 (alength obj))
+                      (.position buf)))))
+
+(defprimitive float-array [buf ^"[F" obj ^Number len]
+  (let [a (float-array len)
+        fb (.asFloatBuffer buf)]
+    (.get fb a)
+    (.position buf (+ (* 4 (alength a)) (.position buf)))
+    a)
+  (let [fb (.asFloatBuffer buf)]
+    (.put fb obj)
+    (.position buf (+ (* 4 (alength obj))
+                      (.position buf)))))
+
+(defprimitive double-array [buf ^"[D" obj ^Number len]
+  (let [a (double-array len)
+        db (.asDoubleBuffer buf)]
+    (.get db a)
+    (.position buf (+ (* 8 (alength a)) (.position buf)))
+    a)
+  (let [db (.asDoubleBuffer buf)]
+    (.put db obj)
+    (.position buf (+ (* 8 (alength obj))
+                      (.position buf)))))
 
 ;;; pseudo-formats for selecting byte order within a format declaration
 

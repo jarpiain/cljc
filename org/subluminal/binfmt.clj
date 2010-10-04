@@ -1,5 +1,6 @@
 (ns org.subluminal.binfmt
   (:refer-clojure)
+  (:use (clojure.contrib [macro-utils :only (symbol-macrolet)]))
   (:import (java.nio ByteBuffer ByteOrder)
            (clojure.lang Var)))
 
@@ -13,7 +14,7 @@
 
 (def *known-types* (atom {}))
 
-(defn- lookup [tag]
+(defn lookup [tag]
   (swap! *known-types*
          (fn [ts]
            (if (contains? ts tag)
@@ -30,16 +31,16 @@
 (defn redef-tag! [tag val]
   (swap! *known-types* assoc tag val))
 
-(defn- lookup-reader [tag]
+(defn lookup-reader [tag]
   (get (lookup tag) :reader))
 
-(defn- lookup-writer [tag]
+(defn lookup-writer [tag]
   (get (lookup tag) :writer))
 
-(defn read-bainary [tag buf & more]
+(defn read-binary [tag buf & more]
   (apply (lookup-reader tag) buf more))
 
-(defn write-bainary [tag buf obj & more]
+(defn write-binary [tag buf obj & more]
   (apply (lookup-writer tag) buf obj more))
 
 (defmacro defprimitive [tag [buf obj & args] rd wr]
@@ -67,9 +68,9 @@
   (.put buf (byte obj)))
 
 (defprimitive uint8 [buf ^Number obj]
-  (let [b (long (.get buf))]
+  (let [b (int (.get buf))]
     (bit-and b 0xFF))
-  (let [ub (long obj)
+  (let [ub (int obj)
         b (byte (if (> ub 0x7F) (bit-or ub -0x80) ub))]
     (.put buf b)))
 
@@ -88,6 +89,7 @@
     (take n (map #(if (< % 0) (+ % 256) %)
 		 (seq (.array buf))))))
 
+(comment
 (defmulti read-binary
   "Tries to parse binary data from a ByteBuffer in the specified format"
   (fn [tag & _] tag))
@@ -95,7 +97,7 @@
 (defmulti write-binary
   "Writes a clojure data structure into a ByteBuffer in the specified
   binary format"
-  (fn [tag & _] tag))
+  (fn [tag & _] tag)))
 
 (defn parse-file [tag filename & more]
   (let [file (FileInputStream. (str filename))
@@ -111,6 +113,7 @@
 
 ;;; pseudo-format for fields that should not be serialized
 
+(comment
 (defmethod read-binary ::null [_ buf] nil)
 (defmethod write-binary ::null [_ buf obj])
 
@@ -190,8 +193,7 @@
   [_ ^ByteBuffer buf] (.order buf ByteOrder/BIG_ENDIAN))
 
 (defmethod write-binary ::set-be-mode
-  [_ ^ByteBuffer buf x] (.order buf ByteOrder/BIG_ENDIAN))
-
+  [_ ^ByteBuffer buf x] (.order buf ByteOrder/BIG_ENDIAN)))
 
 
 (defn kw->sym [kw]
@@ -199,58 +201,112 @@
 
 (declare make-reader make-reader-1)
 (declare make-writer make-writer-1)
-(def collect-fields)
+(declare collect-fields collect-aux)
+
+(defn defbin-children [node]
+  (when (seq node)
+    (case (first node)
+      do (next node)
+      if (nnext node)
+      when (nnext node)
+      cond (take-nth 2 (next (next node)))
+      case (take-nth 2 (next (nnext node)))
+      select (take-nth 2 (next (nnext node)))
+      align nil
+      skip nil)))
+
+(defn deep-fields [body]
+  (filter vector? (tree-seq seq? defbin-children body)))
+
+(defn field-typ [[tag typ]]
+  (if (vector? typ)
+    (first typ)
+    typ))
+
+(defn lookup-accessors [ts]
+  (vec (apply concat
+         (for [[tag [rd wr]] ts]
+           [rd `(lookup-reader ~tag) wr `(lookup-writer ~tag)]))))
 
 (defmacro defbinary [name-ctx & body]
   (let [name (if (vector? name-ctx) (first name-ctx) name-ctx)
-        ctx (if (vector? name-ctx) (next name-ctx))
+        ctx (when (vector? name-ctx) (next name-ctx))
         namekw (sym->kw name)
         gtag (gensym "TAG")
         gbuf (gensym "BUF")
-        ginitargs (gensym "ARGS")]
-    `(do
-       (defmethod read-binary ~namekw [~gtag ~(with-meta gbuf
-                                                {:tag `ByteBuffer})
-                                       ~@ctx]
-         (let [~name {}]
-           ~(make-reader name gtag gbuf body)))
-       (defmethod write-binary ~namekw [~gtag ~(with-meta gbuf
-                                                 {:tag `ByteBuffer})
-                                        ~name ~@ctx]
-         (let ~(vec (apply concat (collect-fields body name)))
-           ~(make-writer name gtag gbuf body))))))
+        typs (into #{} (map field-typ (deep-fields `(do ~@body))))
+        typs (into {} (for [tag typs] [tag [(gensym "RD") (gensym "WR")]]))]
+    `(let ~(lookup-accessors typs)
+       (defprimitive ~name ~(apply vector gbuf name ctx)
+          (let [~name {}]
+            ~(make-reader name gtag gbuf body typs))
+          (let ~(vec (apply concat (collect-fields body name)))
+            (let ~(vec (apply concat (collect-aux body name)))
+              ~(make-writer name gtag gbuf body typs)))))))
 
 (defn- collect-field [fld fmtname]
   (if (keyword? (first fld))
     (let [[tag _ {:keys [aux]}] fld]
-      (list [(kw->sym tag) (if aux aux `(~fmtname ~tag))]))
+      (if aux ()
+        (list [(kw->sym tag) `(~fmtname ~tag)])))
     (if (= (first fld) 'do)
       (collect-fields (next fld) fmtname))))
+
+(defn- collect-aux-field [fld fmtname]
+  (if (keyword? (first fld))
+    (let [[tag _ {:keys [aux]}] fld]
+      (if aux
+        (list [(kw->sym tag) aux])
+        ()))
+    (if (= (first fld) 'do)
+      (collect-aux (next fld) fmtname))))
 
 (defn- collect-fields [body fmtname]
   (mapcat #(collect-field % fmtname) body))
 
+(defn collect-aux [body fmtname]
+  (mapcat #(collect-aux-field % fmtname) body))
 
 (defn- make-reader
-  ([name gtag gbuf fields] (make-reader name gtag gbuf fields name))
-  ([name gtag gbuf fields remain]
-   (reduce #(make-reader-1 name gtag gbuf %2 %1)
+  ([name gtag gbuf fields typs] (make-reader name gtag gbuf fields name typs))
+  ([name gtag gbuf fields remain typs]
+   (reduce #(make-reader-1 name gtag gbuf %2 %1 typs)
            remain
            (reverse fields))))
 
-(defn- make-writer [name gtag gbuf fields]
-  (reduce #(make-writer-1 name gtag gbuf %2 %1)
+(defn- make-writer [name gtag gbuf fields typs]
+  (reduce #(make-writer-1 name gtag gbuf %2 %1 typs)
           nil
           (reverse fields)))
 
-(defn- make-field-reader [fmt-name gtag gbuf fld remain]
+(defn- binary-source-form [tag args gbuf typs]
+  (let [fmt (lookup tag)
+        [rd _] (typs tag)]
+    (if (:inline fmt)
+      (let [[ [buf & more] rd-body] (:reader-source fmt)]
+        `(symbol-macrolet ~(apply vector buf gbuf
+                                  (interleave more args))
+           ~rd-body))
+      `(~rd ~gbuf ~@args))))
+
+(defn- binary-dest-form [tag args gbuf fmt-name typs]
+  (let [fmt (lookup tag)
+        [_ wr] (typs tag)]
+    (if (:inline fmt)
+      (let [[ [buf obj & more] wr-body] (:writer-source fmt)]
+        `(symbol-macrolet ~(apply vector buf gbuf obj fmt-name
+                                  (interleave more args))
+           ~wr-body))
+      `(~wr ~gbuf ~@args))))
+
+(defn- make-field-reader [fmt-name gtag gbuf fld remain typs]
   (let [[tag typ opt] fld
         opt (if (nil? opt) {} opt)
 
         source-form (or (:transient opt)
                         (if (vector? typ)
-                          `(read-binary ~(first typ) ~gbuf ~@(next typ))
-                          `(read-binary ~typ ~gbuf)))
+                          (binary-source-form (first typ) (next typ) gbuf typs)
+                          (binary-source-form typ () gbuf typs)))
         decode-form (cond
                       (:enum opt)
                       `(let [numv# ~source-form
@@ -313,10 +369,10 @@
          (let [~(kw->sym tag) (~tag ~fmt-name)]
            ~remain)))))
 
-(defn- make-reader-1 [fmt-name gtag gbuf fld remain]
+(defn- make-reader-1 [fmt-name gtag gbuf fld remain typs]
   (cond
     (or (keyword? (first fld)) (= (first fld) 'internal))
-    (make-field-reader fmt-name gtag gbuf fld remain)
+    (make-field-reader fmt-name gtag gbuf fld remain typs)
 
     (= (first fld) 'skip)
     (let [[count] (next fld)]
@@ -377,7 +433,7 @@
                             (partition 2 body))
                        remain)))))
 
-(defn- make-writer-1 [fmt-name tag# gbuf fld remain]
+(defn- make-writer-1 [fmt-name tag# gbuf fld remain typs]
   (cond
     (or (keyword? (first fld)) (= (first fld) 'internal))
     (let [[tag typ opt] fld
@@ -400,9 +456,9 @@
                                  0 ~source-form)
                         :default source-form)
           output-form (if (vector? typ)
-                        `(write-binary ~(first typ) ~gbuf
-                                       ~encode-form ~@(next typ))
-                        `(write-binary ~typ ~gbuf ~encode-form))
+                        (binary-dest-form (first typ) (next typ)
+                                           gbuf encode-form typs)
+                        (binary-dest-form typ () gbuf encode-form typs))
           iter-form (cond
                       (:times opt)
                       `(doseq [~source-form ~source-form] ~output-form)
@@ -499,6 +555,5 @@
       c
       (recur (inc c) (int (bit-and x (dec x)))))))
 
-
-(defn pad4 [^Long x] (bit-and (+ x 3) -4))
-(defn padd4 [^Long x] (- (pad4 x) x))
+(definline pad4 [^Long x] `(bit-and (+ ~x 3) -4))
+(definline padd4 [^Long x] `(let [x# ~x] (- (pad4 x#) x#)))

@@ -5,6 +5,7 @@
            (clojure.lang Var)))
 
 (import 'java.io.FileInputStream
+        'java.io.File
         'java.nio.channels.FileChannel
         'java.nio.channels.FileChannel$MapMode)
 
@@ -27,6 +28,12 @@
   (let [{^Var rd-var :reader ^Var wr-var :writer} (lookup tag)]
     (.bindRoot rd-var rd)
     (.bindRoot wr-var wr)))
+
+;; target must exist
+(defn alias-tag! [target alias]
+  (swap! *known-types*
+         (fn [ts]
+           (assoc ts alias (ts target)))))
 
 (defn redef-tag! [tag val]
   (swap! *known-types* assoc tag val))
@@ -83,7 +90,7 @@
 		 (seq (.array buf))))))
 
 (defn parse-file [tag filename & more]
-  (let [file (FileInputStream. (str filename))
+  (let [file (FileInputStream. (File. filename))
         chan (.getChannel file)
         siz (.size chan)
         buf (.map chan FileChannel$MapMode/READ_ONLY 0 siz)]
@@ -243,7 +250,10 @@
       if (nnext node)
       when (nnext node)
       cond (take-nth 2 (next (next node)))
-      case (take-nth 2 (next (nnext node)))
+      case (concat (take-nth 2 (next (nnext node)))
+                   (if (odd? (count node))
+                     [(last node)]
+                     []))
       select (take-nth 2 (next (nnext node)))
       align nil
       skip nil)))
@@ -424,9 +434,11 @@
     (= (first fld) 'if)
     (let [[test then else] (next fld)]
       `(let [~fmt-name (if ~test
-                         ~(make-reader-1 fmt-name gtag gbuf then fmt-name)
+                         ~(make-reader-1 fmt-name gtag gbuf
+                                         then fmt-name typs)
                          ~(if else
-                            (make-reader-1 fmt-name gtag gbuf else fmt-name)
+                            (make-reader-1 fmt-name gtag gbuf
+                                           else fmt-name typs)
                             fmt-name))]
          ~remain))
 
@@ -434,7 +446,7 @@
     `(let [~fmt-name (cond
                        ~@(mapcat (fn [[tst fld]]
                                    (list tst (make-reader-1 fmt-name gtag gbuf
-                                                            fld fmt-name)))
+                                                            fld fmt-name typs)))
                               (partition 2 (next fld))))]
        ~remain)
 
@@ -445,15 +457,17 @@
                                      (if fld
                                        (list val (make-reader-1 fmt-name
                                                                 gtag gbuf
-                                                                fld fmt-name))
+                                                                fld fmt-name
+                                                                typs))
                                        (list (make-reader-1 fmt-name gtag gbuf
-                                                            val fmt-name))))
+                                                            val fmt-name
+                                                            typs))))
                              (partition 2 2 [] body)))]
          ~remain))
 
 
     (= (first fld) 'do)
-    `(let [~fmt-name ~(make-reader fmt-name gtag gbuf (next fld))]
+    `(let [~fmt-name ~(make-reader fmt-name gtag gbuf (next fld) typs)]
        ~remain)
 
     (= (first fld) 'select)
@@ -464,7 +478,7 @@
                        (map (fn [[bit fld]]
                               `(if (~bit ~gselval) ~fld))
                             (partition 2 body))
-                       remain)))))
+                       remain typs)))))
 
 (defn- make-writer-1 [fmt-name tag# gbuf fld remain typs]
   (cond
@@ -524,11 +538,11 @@
       `(do (if ~test
              (let ~(vec (apply concat
                                (collect-field then fmt-name)))
-               ~(make-writer-1 fmt-name tag# gbuf then fmt-name))
+               ~(make-writer-1 fmt-name tag# gbuf then fmt-name typs))
              ~(if else
                 `(let ~(vec (apply concat
                                    (collect-field else fmt-name)))
-                   ~(make-writer-1 fmt-name tag# gbuf else fmt-name))))
+                   ~(make-writer-1 fmt-name tag# gbuf else fmt-name typs))))
            ~remain))
 
     (= (first fld) 'cond)
@@ -538,7 +552,7 @@
                          `(let ~(vec (apply concat
                                                  (collect-field fld fmt-name)))
                            ~(make-writer-1 fmt-name tag# gbuf
-                                           fld fmt-name))))
+                                           fld fmt-name typs))))
                      (partition 2 (next fld))))
        ~remain)
 
@@ -551,17 +565,17 @@
                              `(let ~(vec (apply concat
                                                 (collect-field fld fmt-name)))
                                 ~(make-writer-1 fmt-name tag# gbuf
-                                                fld fmt-name)))
+                                                fld fmt-name typs)))
                            (list
                              `(let ~(vec (apply concat
                                                (collect-field tst fmt-name)))
                                 ~(make-writer-1 fmt-name tag# gbuf
-                                                tst fmt-name)))))
+                                                tst fmt-name typs)))))
                        (partition 2 2 [] body)))
          ~remain))
 
     (= (first fld) 'do)
-    `(do ~(make-writer fmt-name tag# gbuf (next fld))
+    `(do ~(make-writer fmt-name tag# gbuf (next fld) typs)
          ~remain)
 
     (= (first fld) 'select)
@@ -571,7 +585,7 @@
          ~@(map (fn [[flag fld]]
                   (make-writer-1 fmt-name tag# gbuf
                                  `(if (~gmask ~flag) ~fld)
-                                 fmt-name))
+                                 fmt-name typs))
                 (partition 2 clauses))))))
 
 (defmacro >-

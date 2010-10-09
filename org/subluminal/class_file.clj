@@ -1171,6 +1171,8 @@
     :else
     cls))
 
+;; class Foo { X bar; }
+;; --> [Foo 'bar X]
 (defn field-to-pool [fld]
   (let [fname (if (instance? fld Field)
                 (symbol (.getName fld))
@@ -1194,6 +1196,52 @@
             _ (update-val :fields #(assoc % [fname fclass fdesc]
                                             (count pool)))]
            (count pool)) tab)))))
+
+(defn method-args [mdesc]
+  (if (instance? mdesc Method)
+    (vec (map class-to-descriptor
+              (seq (.getParameterTypes ^Method mdesc))))
+    (let [[_ _ [_ _ args]] mdesc]
+      args)))
+
+;; class Foo { X bar(Y) {...} }
+;; --> [Foo 'bar [:method X [Y]]]
+(defn method-to-pool [meth key]
+  (let [mname (if (instance? meth Method)
+                (symbol (.getName meth))
+                (second meth))
+        mclass (if (instance? meth Method)
+                 (symbol (.getName (.getClass meth)))
+                 (first meth))
+        mdesc (if (instance? meth Method)
+                [:method (class-to-descriptor (.getReturnType meth))
+                         (method-args meth)]
+                (nth meth 2))]
+    (fn [tab]
+      (if-let [idx (get (key tab) [mname mclass mdesc])]
+        [idx tab]
+        ((domonad state-m
+           [cli (class-to-pool mclass)
+            desci (desc-to-pool [mname mdesc])
+            pool (fetch-val :pool)
+            _ (update-val :pool #(conj % {:tag (if (= key :methods)
+                                                 :method
+                                                 :interface-method)
+                                          :class-index cli
+                                          :name-type-index desci}))
+            _ (update-val key #(assoc % [mname mclass mdesc]
+                                        (count pool)))]
+           (count pool)) tab)))))
+
+;; need class name strings for "[I" etc.?
+(defmulti const-to-pool class)
+
+(defmethod const-to-pool Class [c] (class-to-pool c))
+(defmethod const-to-pool Integer [c] (int-to-pool c))
+(defmethod const-to-pool Long [c] (long-to-pool c))
+(defmethod const-to-pool Float [c] (float-to-pool c))
+(defmethod const-to-pool Double [c] (double-to-pool c))
+(defmethod const-to-pool String [c] (string-to-pool c))
 
 (defn init-class [cls]
   (let [[res syms]
@@ -1237,10 +1285,11 @@
     (let [[[namei desci] tab]
           ((domonad state-m
              [n (utf-to-pool (str name))
-              d (utf-to-pool (method-descriptor-string descriptor))]
+              d (utf-to-pool (method-descriptor-string (next descriptor)))]
              [n d])
            (:symtab @cref))
           mref (ref (assoc meth :name-index namei
+                                :attributes []
                                 :descriptor-index desci))]
       (alter cref #(-> % (update-in [:methods] conj mref)
                          (assoc :symtab tab)))
@@ -1266,7 +1315,7 @@
 (defn advance [[min max]]
   (fn [code]
     (let [[l r] (:pc code)]
-      [nil (assoc-in [code :pc] [(+ l min) (+ r max)])])))
+      [nil (assoc code :pc [(+ l min) (+ r max)])])))
 
 (defn bound-interval? [[s1 s2] [d1 d2] [low hi]]
   (and (<= low (- d1 s1) hi)
@@ -1291,16 +1340,17 @@
      :istore-1 :istore-2 :istore-3 :isub :iushr :ixor :l2d :l2f :l2i
      :ladd :laload :land :lastore :lcmp :lconst-0 :lconst-1 :ldiv
      :lload-0 :lload-1 :lload-2 :lload-3 :lmul :lneg :lor :lrem
-     :lreturn :lshl :lstore-0 :lstore-1 :lstore-2 :lstore-3 :lsub
+     :lreturn :lshl :lshr :lstore-0 :lstore-1 :lstore-2 :lstore-3 :lsub
      :lushr :lxor :monitorenter :monitorexit :nop :pop :pop2
      :return :saload :sastore :swap})
 
-(defn exact-size [[op & args] pc]
+(defn exact-size
+  [[op & args :as ins] pc]
   (if (contains? +simple-instructions+ op)
     1
     (case op
       (:aload :astore :bipush :dload :dstore :fload :fstore
-       :iload :istore :lload :lstore :newarray :ret)
+       :iload :istore :lload :lstore :newarray :ret :ldc)
       2
       (:anewarray :checkcast :getfield :getstatic :iinc :instanceof
        :invokedynamic :invokespecial :invokestatic :invokevirtual
@@ -1314,7 +1364,9 @@
       (:tableswitch :lookupswitch)
       0)))
 
-(defn ins-size [[pc1 pc2] [op target :as ins] labels]
+(defn ins-size
+  "Estimate size of one instruction"
+  [[pc1 pc2] [op target :as ins] labels]
   (if (contains? +simple-instructions+ op)
     [1 1]
     (case op
@@ -1342,10 +1394,6 @@
             [3 7])))
       (:tableswitch :lookupswitch :wide)
       [0 0]))) ; variable padding
-
-(defn refine [ins pc labels]
-  (let [size 0]
-    [size ins]))
 
 (defn add-label [lbl]
   (fn [code]
@@ -1383,20 +1431,23 @@
   (let [anc (ancestors *java-hierarchy* x)]
     (if (and (class? x)
              (.isArray ^Class x))
-      (->> (.getComponentType x) ancestors+
+      (->> (.getComponentType ^Class x) ancestors+
            (filter class?) (map array-class)
            (into anc))
       anc)))
 
+;; handles array class covariance
 (defn j-isa? [x y]
   (or (isa? *java-hierarchy* x y)
       (and (isa? *java-hierarchy* y :reference)
            (= x :null))
       (and (class? x) (class? y)
            (let [^Class x x ^Class y y]
-             (and (.isArray x) (.isArray y)
-                  (j-isa? (.getComponentType x)
-                          (.getComponentType y)))))))
+             (.isAssignableFrom y x)))))
+
+;             (and (.isArray x) (.isArray y)
+;                  (j-isa? (.getComponentType x)
+;                          (.getComponentType y)))))))
 
 (defn unify1 [l r]
   (cond
@@ -1470,30 +1521,266 @@
         (recur (next ins) (next blocks) neighbors pc op)
         (recur (next ins) blocks neighbors curr op)))))
 
-;; Convert symbolic values to pool indices first
-(defn emit [cref mref instr]
+;; Does not convert labels to offsets (offset16, 32)
+(defn lookup-instr-arg [atyp asym locals code pool]
+;  (with-monad state-m
+    (case atyp
+      ::local-var (with-monad state-m (m-result (locals asym)))
+      ::pool-class (class-to-pool asym)
+      ::pool-field (field-to-pool asym)
+      ::pool-method (method-to-pool asym :methods)
+      ::pool-iface-method (method-to-pool asym :imethods)
+      ::pool-name-type (desc-to-pool asym)
+
+      (::pool-constant8 ::pool-constant16)
+      (const-to-pool asym)
+
+      ::zero (with-monad state-m (m-result 0))
+      ::pad4 (with-monad state-m (m-result nil))
+
+      (::primitive-tag ::bin/int8 ::bin/uint8 ::bin/int32 ::bin/int16
+       ::offset16 ::offset32)
+      (with-monad state-m (m-result asym))))
+
+;; [:astore 0] --> :astore-0, etc.
+(defn load-store-op [op n]
+  (keyword (str (name op) "-" n)))
+
+(defn sizeof-desc [desc]
+  (cond
+    (= desc :long) 2
+    (= desc :double) 2
+    :else 1))
+
+;; Convert Xload n <--> Xload_n, etc.
+;; Do NOT convert bipush -> sipush
+;; Do NOT convert goto <-> goto-w (see #'refine)
+;; invokeinterface, wide, *switch need the original (symbolic) arguments
+(defn emit-modify [[op & args :as ins] orig]
+  (if (contains? +simple-instructions+ op)
+    ins
+    (case op
+      (:aload :astore :iload :istore :lload :lstore
+       :fload :fstore :dload :dstore)
+      (let [[idx] args]
+        (cond
+          (<= idx 3) [(load-store-op op idx)]
+          (<= idx 0xFF) ins
+          :else [:wide op idx]))
+
+      (:ldc :ldc-w)
+      (let [[idx] args]
+        (if (<= idx 0xFF)
+          [:ldc idx]
+          [:ldc-w idx]))
+
+      :ret
+      (let [[idx] args]
+        (if (<= idx 0xFF)
+          [:ret idx]
+          [:wide :ret idx]))
+
+      :iinc
+      (let [[idx const] args]
+        (if (and (<= idx 0xFF) (<= -0x80 const 0x7F))
+          ins
+          [:wide op idx const]))
+
+      ; calculate argument count including 'this'
+      :invokeinterface
+      (let [[idx] args
+            iface-args (method-args orig)]
+        [op idx (->> iface-args
+                     (map sizeof-desc)
+                     (reduce + 1))
+            0])
+
+      :lookupswitch
+      (let [[_ default n & pairs] orig]
+        (apply vector op nil default n pairs))
+
+      :tableswitch
+      (let [[_ default low high & tab] orig]
+        (apply vector op nil default low high tab))
+
+      :wide
+      ins ; TODO: narrow
+
+      (:anewarray :bipush :checkcast :getfield :getstatic
+       :goto :goto-w :if-acmpeq :if-acmpne :if-icmpeq :if-icmpne
+       :if-icmplt :if-icmpge :if-icmpgt :if-icmple
+       :ifeq :ifne :iflt :ifge :ifgt :ifle
+       :ifnonnull :ifnull :instanceof
+       :invokedynamic :invokespecial :invokevirtual
+       :jsr :jsr-w :ldc2-w :multianewarray :new :newarray
+       :putfield :putstatic :sipush)
+      ins
+      )))
+
+(defn emit1
+  "Add one instruction to the code buffer converting symbolic
+  constants to constant pool indices"
+  [cref mref instr ctx]
   (dosync
-    (let [code (:disasm @mref)
+    (let [code (get-in @mref [:attributes 0])
+          pool (:symtab @cref)
           currpc (:pc code)
-          [op & args] instr]
-      (alter mref update-in [:disasm]
+          [op & args] instr
+          {:keys [locals]} ctx
+          arg-m (with-monad state-m
+                  (m-map (fn [[t a]]
+                           (lookup-instr-arg t a locals code pool))
+                         (map vector
+                              (next (+opcodes+ op))
+                              args)))]
+      (let [[argidx ntab] (arg-m pool)
+            ninstr (emit-modify (apply vector op argidx) args)
+            [nextpc ncode] ((domonad state-m
+                              [nextpc (advance
+                                        (ins-size currpc instr
+                                                  (:labels code)))
+                               _ (update-val :disasm
+                                   #(conj % ninstr))]
+                              nextpc) code)]
+        (alter mref assoc-in [:attributes 0] ncode)
+        (alter cref assoc :symtab ntab)))))
+
+(defn label? [ins]
+  (= (first ins) 'label))
+
+(defn block? [ins]
+  (= (first ins) 'block))
+
+(defn emit
+  "Add an instruction, block, or label into the instruction stream"
+  ([cref mref item] (emit cref mref item {}))
+  ([cref mref item ctx]
+   (cond
+     (label? item)
+     (let [[_ lbl] item]
+        (dosync
+         (alter mref update-in [:attributes 0]
+                (comp second
+                  (domonad state-m
+                    [_ (add-label lbl)
+                     _ (update-val :disasm #(conj % item))]
+                    nil)))))
+
+     (block? item)
+     (let [[_ lbl vars & items] item]
+       (dosync
+         (when lbl (emit cref mref ['label lbl]))
+         (let [subctx (apply assoc ctx vars)]
+           (doseq [i items]
+             (emit cref mref subctx)))))
+
+     :else
+     (emit1 cref mref item ctx))))
+
+(def +negate-op+
+  (let [pairs {:if-acmpeq :if-acmpne,
+               :if-icmpeq :if-icmpne,
+               :if-icmplt :if-icmpge,
+               :if-icmpgt :if-icmple,
+               :ifeq :ifne, :iflt :ifge, :ifgt :ifle,
+               :ifnonnull :ifnull}]
+    (into pairs (bin/invert-map pairs)))) ; symmetrize
+
+;; Transform if* --> ifnot* goto-w,
+;;           goto --> goto-w
+;; if necessary
+(defn refine-split [[op & args :as ins] pc labels]
+  (case op
+    (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
+     :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
+     :ifgt :ifle :ifnonnull :ifnull)
+    (let [[target] args]
+      (if (integer? target)
+        [ins]
+        (if-let [target-label (labels target)]
+          (if (bound-interval? [pc pc] target-label [-0x8000 0x7FFF])
+            [ins]
+            [[(get +negate-op+ op) 8]
+             [:goto-w target]])
+          (throw (IllegalArgumentException.
+                   (str "Undefined label " target))))))
+    
+    (:goto :goto-w)
+    (let [[target] args]
+      (if (integer? target)
+        [ins]
+        (if-let [target-label (labels target)]
+          (if (bound-interval? [pc pc] target-label [-0x8000 0x7FFF])
+            [:goto target]
+            [:goto-w target])
+          (throw (IllegalArgumentException.
+                   (str "Undefined label " target))))))
+
+    ; default
+    [ins]))
+
+(defn refine1
+  "Calculate exact offset and size for one label or instruction"
+  [ins]
+  (if (label? ins)
+    ;; Remove the label from instruction stream
+    (let [[_ lbl] ins]
+      (fn [{:keys [labels pc] :as code}]
+        [nil (assoc-in code [:labels lbl] [pc pc])]))
+    (fn [{:keys [labels pc] :as code}]
+      (let [split (refine-split ins pc labels)]
+        (loop [target (:disasm code) pc pc remain split]
+          (if (seq remain)
+            (let [ins (first remain)
+                  siz (exact-size ins pc)]
+              (recur (assoc target pc ins)
+                     (+ pc siz)
+                     (next remain)))
+            [nil (-> code (assoc-in [:pc] pc)
+                          (assoc-in [:disasm] target))]))))))
+
+(defn refine
+  "Calculate exact offsets for all instructions and labels in a method"
+  [meth]
+  (dosync
+    (alter meth
+           update-in [:attributes 0]
+           (comp second
              (domonad state-m
-               [nextpc (advance (ins-size currpc instr (:labels code)))
-                _ (update-val :disasm conj (apply vector currpc instr))]
-               nextpc)))))
+               [_   (set-val :pc 0)
+                ins (set-val :disasm (sorted-map))
+                _   (m-map refine1 ins)
+                siz (fetch-val :pc)
+                _   (set-val :code-length siz)]
+               nil)))))
 
 ;; refine, compute block graph, generate stack map, emit bytecode
-(defn assemble [mref]
-  mref)
+(defn assemble-method [mref]
+  (dosync
+    (when-not (some #{:abstract :native} (:flags @mref))
+      (refine mref))))
+
+(defn assemble-class [cref]
+  (dosync
+    (let [cls @cref]
+      (assoc cls
+             :methods (map deref (:methods cls))
+             :fields (map deref (:fields cls))))))
 
 (defmacro assembling [bindings & body]
   (let [syms (take-nth 2 bindings)
         vals (take-nth 2 (rest bindings))
-        vars (map (fn [expr]
+        refs (map (fn [expr]
                     `(ref (init-class (merge empty-class ~expr))))
                   vals)
         names (map :name vals)]
-    `(let ~(vec (interleave syms vars))
+    `(let ~(vec (interleave syms refs))
        (binding [*assembling* (assoc *assembling*
                                      ~@(interleave names syms))]
          ~@body))))
+
+;;;; Debug: inspect classes being generated in assembling
+
+(defn inspect [cref]
+  (clojure.inspector/inspect-tree
+    (assemble-class cref)))

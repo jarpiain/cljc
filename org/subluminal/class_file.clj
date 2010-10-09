@@ -292,7 +292,7 @@
   [:symtab ::null {:transient {:pool []}}] ; (split-pool constant-pool)
   [:flags ::bin/uint16
      {:bitmask {:public 0 :final 4 :super 5 :interface 9 :abstract 10
-                :synthetic 11 :annotation 12 :enum 13}}]
+                :synthetic 12 :annotation 13 :enum 14}}]
   [:this-class ::bin/uint16 {:constraint #(< 0 % constant-pool-count)}]
   [:name ::null
     {:transient (to-symbol (class-name constant-pool this-class))}]
@@ -1296,8 +1296,6 @@
       (when-not (some #{:abstract :native} flags)
         (add-attribute cref mref {:name "Code"
                                   :labels {}
-                                  :frames {}
-                                  :basic-blocks #{} ; set of labels
                                   :pc [0 0]
                                   :max-stack 0
                                   :max-locals 0
@@ -1306,11 +1304,6 @@
                                   :exception-table []
                                   :attributes []}))
       mref)))
-
-;;;; Bytecode transformations
-;; - Reserve space for conversion of e.g.
-;;   [ifX target] to [if_notX 8] [goto_w target]
-;;   by keeping track of the interval of possible pc values
 
 (defn advance [[min max]]
   (fn [code]
@@ -1349,24 +1342,43 @@
   (if (contains? +simple-instructions+ op)
     1
     (case op
-      (:aload :astore :bipush :dload :dstore :fload :fstore
-       :iload :istore :lload :lstore :newarray :ret :ldc)
+      (:aload :astore :bipush :dload :dstore :fload :fstore :iload :istore
+       :ldc :lload :lstore :newarray :ret)
       2
       (:anewarray :checkcast :getfield :getstatic :iinc :instanceof
        :invokedynamic :invokespecial :invokestatic :invokevirtual
-       :ldc-w :ldc2-w :new :putfield :putstatic :sipush :goto :jsr
-       :if*)
+       :ldc-w :ldc2-w :new :putfield :putstatic :sipush
+       :goto :jsr)
       3
       (:multinewarray)
       4
-      (:goto-w :invokeinterface :jsr-w)
+      (:invokeinterface :jsr-w :goto-w)
       5
-      (:tableswitch :lookupswitch)
-      0)))
+
+      (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
+       :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
+       :ifgt :ifle :ifnonnull :ifnull)
+      3
+
+      :lookupswitch
+      (let [[_ default count] args 
+            fix (+ 9 (* 8 count))
+            pad (bin/padd4 (inc pc))]
+        (+ fix pad))
+
+      :tableswitch
+      (let [[_ default low high] args
+            fix (+ 13 (* 4 (inc (- high low))))
+            pad (bin/padd4 (inc pc))]
+        (+ fix pad))
+
+      :wide
+      (let [[_ op] ins]
+        (if (= op :iinc) 6 4)))))
 
 (defn ins-size
   "Estimate size of one instruction"
-  [[pc1 pc2] [op target :as ins] labels]
+  [pc [op target :as ins] labels]
   (if (contains? +simple-instructions+ op)
     [1 1]
     (case op
@@ -1379,21 +1391,46 @@
       [3 3]
       (:multinewarray)
       [4 4]
-      (:goto-w :invokeinterface :jsr-w)
+      (:invokeinterface :jsr-w)
       [5 5]
-      (:goto :jsr)
-      [3 5] ; improve...
-      (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
-       :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifgt
-       :ifle :ifnonnull :ifnull)
-      (let [[tmin tmax :as tintv] (labels target)]
-        (if-not tintv
-          [3 7]
-          (if (bound-interval? [pc1 pc2] [tmin tmax] [-0x8000 0x7FFF])
+      (:goto :jsr :goto-w)
+      (if (integer? target)
+        (if (<= -0x8000 target 0x7FFF)
+          [3 3]
+          [5 5])
+
+        (if-let [lbl (get labels target)]
+          (if (bound-interval? pc lbl [-0x8000 0x7FFF])
             [3 3]
-            [3 7])))
-      (:tableswitch :lookupswitch :wide)
-      [0 0]))) ; variable padding
+            [3 5])
+          [3 5]))
+
+      (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
+       :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
+       :ifgt :ifle :ifnonnull :ifnull)
+      (if (integer? target)
+        [3 3]
+        (if-let [lbl (get labels target)]
+          (if (bound-interval? pc lbl [-0x8000 0x7FFF])
+            [3 3]
+            [3 8])
+          [3 8]))
+
+      :lookupswitch
+      (let [[_ _ default count] ins
+            fix (+ 9 (* 8 count))]
+        [fix (+ fix 3)])
+
+      :tableswitch
+      (let [[_ _ default low high] ins
+            fix (+ 13 (* 4 (inc (- high low))))]
+        [fix (+ fix 3)])
+
+      :wide
+      (let [[_ op] ins]
+        (if (= op :iinc)
+          [6 6]
+          [4 4])))))
 
 (defn add-label [lbl]
   (fn [code]
@@ -1406,120 +1443,6 @@
       (if (> k prev)
         [nil (assoc code :max-locals k)]
         [nil code]))))
-
-;;;; StackMapTable generation
-
-(def *java-hierarchy*
-  (-> (make-hierarchy)
-      (derive :one-word :top)
-      (derive :two-word :top)
-      (derive :reference :one-word)
-      (derive Object :reference)
-      (derive :uninitialized :reference)
-      (derive :uninitialized-this :uninitialized)
-      (derive :null :reference)
-      (derive :long :two-word)
-      (derive :double :two-word)
-      (derive :int :one-word)
-      (derive :float :one-word)))
-
-(defn array-class [^Class c]
-  (class (make-array c 0)))
-
-;; brute force
-(defn ancestors+ [x]
-  (let [anc (ancestors *java-hierarchy* x)]
-    (if (and (class? x)
-             (.isArray ^Class x))
-      (->> (.getComponentType ^Class x) ancestors+
-           (filter class?) (map array-class)
-           (into anc))
-      anc)))
-
-;; handles array class covariance
-(defn j-isa? [x y]
-  (or (isa? *java-hierarchy* x y)
-      (and (isa? *java-hierarchy* y :reference)
-           (= x :null))
-      (and (class? x) (class? y)
-           (let [^Class x x ^Class y y]
-             (.isAssignableFrom y x)))))
-
-;             (and (.isArray x) (.isArray y)
-;                  (j-isa? (.getComponentType x)
-;                          (.getComponentType y)))))))
-
-(defn unify1 [l r]
-  (cond
-    (and (set? l) (set? r))
-    (clojure.set/intersection l r)
-
-    (set? r)
-    (if (contains? r l) l
-      (clojure.set/intersection
-        (ancestors+ l) r))
-
-    (set? l)
-    (if (contains? l r) r
-      (clojure.set/intersection
-        (ancestors+ r) l))
-
-    (j-isa? l r) r
-    (j-isa? r l) l
-
-    :else
-    (clojure.set/intersection
-      (ancestors+ l)
-      (ancestors+ r))))
-
-(defn unify-frame [pc [loc stak :as curr]]
-  (fn [code]
-    (let [[ploc pstak :as prev] (get (:frames code) pc)]
-      (if prev
-        [nil (assoc-in [code :frames pc]
-                       [(map unify1 loc ploc) (map unify1 stak pstak)])]
-        [nil (assoc-in [code :frames pc] curr)]))))
-
-(defn basic-blocks [ins]
-  (loop [blocks (sorted-set) ins ins start? true]
-    (if-not (seq ins)
-      blocks
-      (let [[pc op target :as whole] (first ins)
-            blocks (if start? (conj blocks pc) blocks)]
-        (case op
-          (:areturn :athrow)
-          (recur blocks (next ins) true)
-
-          (:goto :goto-w :if-acmpeq)
-          (recur (conj blocks target) (next ins) true)
-
-          ;(:lookupswitch :tableswitch)
-          ;(recur (apply conj blocks (switch-targets whole))
-          ;       (next ins) true)
-
-          ; default
-          (recur blocks (next ins) false))))))
-
-(defn block-graph [ins blocks]
-  (loop [ins ins, blocks (seq blocks),
-         neighbors (into {} (map (fn [x] [x #{}]) blocks))
-         curr (first blocks), prev nil]
-    (let [[pc op target :as whole] (first ins)
-          neighbors (if (== pc (first blocks))
-                      (case prev
-                        (:goto :goto-w) neighbors
-                        ; default
-                        (if prev
-                          (update-in [neighbors curr] conj pc)
-                          neighbors)))
-          neighbors (case op
-                      ; branch
-                      (update-in [neighbors pc] conj target)
-                      ; default
-                      neighbors)]
-      (if (== pc (first blocks))
-        (recur (next ins) (next blocks) neighbors pc op)
-        (recur (next ins) blocks neighbors curr op)))))
 
 ;; Does not convert labels to offsets (offset16, 32)
 (defn lookup-instr-arg [atyp asym locals code pool]
@@ -1754,6 +1677,148 @@
                 _   (set-val :code-length siz)]
                nil)))))
 
+;;;; StackMapTable generation
+
+(def *java-hierarchy*
+  (-> (make-hierarchy)
+      (derive :one-word :top)
+      (derive :two-word :top)
+      (derive :reference :one-word)
+      (derive Object :reference)
+      (derive :uninitialized :reference)
+      (derive :uninitialized-this :uninitialized)
+      (derive :null :reference)
+      (derive :long :two-word)
+      (derive :double :two-word)
+      (derive :int :one-word)
+      (derive :float :one-word)))
+
+(defn array-class [^Class c]
+  (class (make-array c 0)))
+
+;; brute force
+(defn ancestors+ [x]
+  (let [anc (ancestors *java-hierarchy* x)]
+    (if (and (class? x)
+             (.isArray ^Class x))
+      (->> (.getComponentType ^Class x) ancestors+
+           (filter class?) (map array-class)
+           (into anc))
+      anc)))
+
+;; handles array class covariance
+(defn j-isa? [x y]
+  (or (isa? *java-hierarchy* x y)
+      (and (isa? *java-hierarchy* y :reference)
+           (= x :null))
+      (and (class? x) (class? y)
+           (let [^Class x x ^Class y y]
+             (.isAssignableFrom y x)))))
+
+;             (and (.isArray x) (.isArray y)
+;                  (j-isa? (.getComponentType x)
+;                          (.getComponentType y)))))))
+
+(defn unify1 [l r]
+  (cond
+    (and (set? l) (set? r))
+    (clojure.set/intersection l r)
+
+    (set? r)
+    (if (contains? r l) l
+      (clojure.set/intersection
+        (ancestors+ l) r))
+
+    (set? l)
+    (if (contains? l r) r
+      (clojure.set/intersection
+        (ancestors+ r) l))
+
+    (j-isa? l r) r
+    (j-isa? r l) l
+
+    :else
+    (clojure.set/intersection
+      (ancestors+ l)
+      (ancestors+ r))))
+
+(defn unify-frame [pc [loc stak :as curr]]
+  (fn [code]
+    (let [[ploc pstak :as prev] (get (:frames code) pc)]
+      (if prev
+        [nil (assoc-in [code :frames pc]
+                       [(map unify1 loc ploc) (map unify1 stak pstak)])]
+        [nil (assoc-in [code :frames pc] curr)]))))
+
+(defn target-offset [target pc labels]
+  (if (integer? target)
+    (+ pc target)
+    (first (get labels target))))
+
+(defn basic-blocks [code labels]
+  (loop [blocks (sorted-map) ins (seq code) start? true]
+    (if-not ins
+      blocks
+      (let [[pc [op target :as whole]] (first ins)
+            blocks (if start? (assoc blocks pc {}) blocks)]
+        (case op
+          (:areturn :athrow :dreturn :freturn :ireturn :lreturn :return)
+          (recur blocks (next ins) true)
+
+          (:goto :goto-w :if-acmpeq :if-acmpne
+           :if-icmpeq :if-icmpne :if-icmplt :if-icmpge
+           :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
+           :ifgt :ifle :ifnonnull :ifnull)
+          (recur (assoc blocks (target-offset target pc labels) {})
+                 (next ins) true)
+
+          :lookupswitch
+          (let [[_ _ default count & pairs] whole]
+            (recur (apply assoc blocks
+                          (target-offset default pc labels) {}
+                          (interleave
+                            (map #(target-offset % pc labels)
+                                 (take-nth 2 (rest pairs)))
+                            (repeat {})))
+                   (next ins) true))
+
+          :tableswitch
+          (let [[_ _ default low high & tab] whole]
+            (recur (apply assoc blocks
+                          (target-offset default pc labels) {}
+                          (interleave
+                            (map #(target-offset % pc labels) tab)
+                            (repeat {})))
+                   (next ins) true))
+
+          ; (:jsr jsr-w :ret) -- unimplemented
+
+          ; default
+          (recur blocks (next ins) false))))))
+
+(defn block-graph [ins blocks]
+  (loop [ins ins, blocks (seq blocks),
+         neighbors (into {} (map (fn [x] [x #{}]) blocks))
+         curr (first blocks), prev nil]
+    (let [[pc op target :as whole] (first ins)
+          neighbors (if (== pc (first blocks))
+                      (case prev
+                        (:goto :goto-w) neighbors
+                        ; default
+                        (if prev
+                          (update-in [neighbors curr] conj pc)
+                          neighbors)))
+          neighbors (case op
+                      ; branch
+                      (update-in [neighbors pc] conj target)
+                      ; default
+                      neighbors)]
+      (if (== pc (first blocks))
+        (recur (next ins) (next blocks) neighbors pc op)
+        (recur (next ins) blocks neighbors curr op)))))
+
+;;;; Top-level interface
+
 ;; refine, compute block graph, generate stack map, emit bytecode
 (defn assemble-method [mref]
   (dosync
@@ -1778,6 +1843,11 @@
        (binding [*assembling* (assoc *assembling*
                                      ~@(interleave names syms))]
          ~@body))))
+
+;; Walk the class description trees
+;; calling add-field, add-method, emit, assemble-method, assemble-class
+(defn assemble [cs]
+  cs)
 
 ;;;; Debug: inspect classes being generated in assembling
 

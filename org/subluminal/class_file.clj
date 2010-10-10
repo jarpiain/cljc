@@ -8,6 +8,33 @@
            (java.lang.reflect Field Method Constructor)
            (java.nio ByteBuffer)))
 
+(defn normalized-clazz? [cls]
+  (or (symbol? cls)  ; class or iface
+      (keyword? cls) ; primitive
+      (and (seq? cls)
+           (= (first cls) :array)
+           (normalized-clazz? (second cls)))))
+
+(defn normalized-fldspec? [fld]
+  (let [[owner name desc] fld]
+    (and owner name desc
+         (normalized-clazz? owner)
+         (symbol? name)
+         (normalized-clazz? desc))))
+
+(defn normalized-methdesc? [meth]
+  (let [[tag ret args] meth]
+    (and (= tag :method)
+         (normalized-clazz? ret)
+         (every? normalized-clazz? args))))
+
+(defn normalized-methspec? [meth]
+  (let [[owner name desc] meth]
+    (and owner name desc
+         (normalized-clazz? owner)
+         (symbol? name)
+         (normalized-methdesc? desc))))
+
 (declare disasm to-symbol class-name pool-string)
 
 ;;;; Parser for descriptor and signature strings
@@ -111,10 +138,12 @@
      ret <field-descriptor>]
     (list 'method ret args)))
 
-(defn class-type-descriptor [^String cname]
+#_(defn class-type-descriptor [^String cname]
   (str "L" (.replace cname \. \/) ";"))
 
 (defn field-descriptor-string [desc]
+  {:pre (normalized-clazz? desc)}
+  (if (class? desc) (throw (NullPointerException. "lsnateonlsm")))
   (cond
     (keyword? desc)
     (case desc
@@ -125,23 +154,26 @@
       :boolean "Z")
 
     (symbol? desc)
-    (class-type-descriptor (name desc))
+    (str "L" (.replace (name desc) \. \/) ";")
 
-    (class? desc)
-    (class-type-descriptor (.getName desc))
+    ;(class? desc)
+    ;(class-type-descriptor (.getName desc))
 
     :else
     (let [[atag component] desc]
       (case atag :array (str "[" (field-descriptor-string component))))))
 
 (defn method-descriptor-string [desc]
-  (let [[ret args] desc]
+  {:pre (normalized-methdesc? desc)}
+  (let [[_ ret args] desc]
     (str "(" (apply str (map field-descriptor-string args)) ")"
          (field-descriptor-string ret))))
 
 (defn descriptor-string [desc]
-  (if (= (first desc) :method)
-    (method-descriptor-string (rest desc))
+  {:pre [(or (normalized-clazz? desc)
+             (normalized-methdesc? desc))]}
+  (if (and (sequential? desc) (= (first desc) :method))
+    (method-descriptor-string desc)
     (field-descriptor-string desc)))
 
 ;; Parse signatures
@@ -1076,6 +1108,7 @@
 ;; adding it if necessary
 
 (defn int-to-pool [val]
+  {:pre [(instance? Integer val)]}
   (fn [tab]
     (if-let [idx (get (:ints tab) (int val))]
       [idx tab]
@@ -1085,6 +1118,7 @@
         [idx ntab]))))
 
 (defn long-to-pool [val]
+  {:pre [(instance? Long val)]}
   (fn [tab]
     (if-let [idx (get (:longs tab) (long val))]
       [idx tab]
@@ -1094,6 +1128,7 @@
         [idx ntab]))))
 
 (defn float-to-pool [val]
+  {:pre [(instance? Float val)]}
   (fn [tab]
     (if-let [idx (get (:floats tab) (float val))]
       [idx tab]
@@ -1103,6 +1138,7 @@
         [idx ntab]))))
 
 (defn double-to-pool [val]
+  {:pre [(instance? Double val)]}
   (fn [tab]
     (if-let [idx (get (:doubles tab) (double val))]
       [idx tab]
@@ -1112,6 +1148,7 @@
         [idx ntab]))))
 
 (defn utf-to-pool [s]
+  {:pre [(instance? String s)]}
   (fn [tab]
     (if-let [idx (get (:utf tab) s)]
       [idx tab]
@@ -1121,6 +1158,7 @@
         [idx ntab]))))
 
 (defn string-to-pool [s]
+  {:pre [(instance? String s)]}
   (fn [tab]
     (if-let [idx (get (:strings tab) s)]
       [idx tab]
@@ -1132,12 +1170,16 @@
          (count pool)) tab))))
 
 (defn desc-to-pool [d]
+  {:pre [(let [[na de] d]
+           (and (symbol? na)
+                (or (normalized-clazz? de)
+                    (normalized-methdesc? de))))]}
   (fn [tab]
     (if-let [idx (get (:descriptors tab) d)]
       [idx tab]
       (let [[name desc] d]
         ((domonad state-m
-           [namei (utf-to-pool name)
+           [namei (utf-to-pool (str name))
             desci (utf-to-pool (descriptor-string desc))
             pool (fetch-val :pool)
             _ (update-val :pool #(conj % {:tag :name-and-type
@@ -1147,16 +1189,16 @@
            (count pool)) tab)))))
 
 (defn class-to-pool [cls]
-  (let [clsym (if (symbol? cls) cls (symbol (.getName cls)))]
-    (fn [tab]
-      (if-let [idx (get (:classes tab) clsym)]
-        [idx tab]
-        ((domonad state-m
-           [stri (utf-to-pool (name clsym))
-            pool (fetch-val :pool)
-            _ (update-val :pool #(conj % {:tag :class :name-index stri}))
-            _ (update-val :classes #(assoc % clsym (count pool)))]
-           (count pool)) tab)))))
+  {:pre [(normalized-clazz? cls)]}
+  (fn [tab]
+    (if-let [idx (get (:classes tab) cls)]
+      [idx tab]
+      ((domonad state-m
+         [stri (utf-to-pool (name cls))
+          pool (fetch-val :pool)
+          _ (update-val :pool #(conj % {:tag :class :name-index stri}))
+          _ (update-val :classes #(assoc % cls (count pool)))]
+         (count pool)) tab))))
 
 (def +primitive-descriptors+
      {Byte/TYPE :byte Short/TYPE :short Integer/TYPE :int
@@ -1164,6 +1206,7 @@
       Character/TYPE :char Void/TYPE :void Boolean/TYPE :boolean})
 
 (defn normalize-type-descriptor [desc]
+  {:post [(normalized-clazz? %)]}
   (cond
     (class? desc)
     (let [^Class cls desc]
@@ -1173,7 +1216,7 @@
         (.isArray cls)
         [:array (normalize-type-descriptor (.getComponentType cls))]
         :else
-        cls))
+        (symbol (.getName cls))))
 
     (and (seq? desc) (= (first desc) :array))
     [:array (normalize-type-descriptor (second desc))]
@@ -1182,13 +1225,15 @@
     desc)) ; must be :primitive or 'qualified.Symbol
 
 (defn normalize-method-descriptor [desc]
+  {:post [(normalized-methdesc? %)]}
   (let [[_ ret args] desc]
     [:method (normalize-type-descriptor ret)
              (vec (map normalize-type-descriptor args))]))
 
 ;; class Foo { X bar; }
 ;; --> [Foo 'bar X]
-(defn field-to-pool [[fname fclass fdesc :as fld]]
+(defn field-to-pool [[fclass fname fdesc :as fld]]
+  {:pre [(normalized-fldspec? fld)]}
   (fn [tab]
     (if-let [idx (get (:fields tab) fld)]
       [idx tab]
@@ -1206,6 +1251,7 @@
 ;; class Foo { X bar(Y) {...} }
 ;; --> [Foo 'bar [:method X [Y]]]
 (defn method-to-pool [[mclass mname mdesc :as meth] key]
+  {:pre [(normalized-methspec? meth)]}
   (fn [tab]
     (if-let [idx (get (key tab) meth)]
       [idx tab]
@@ -1239,11 +1285,12 @@
 (defn init-class [cls]
   (let [[res syms]
         ((domonad state-m
-           [this-class (class-to-pool (:name cls))
+           [this-class (class-to-pool (normalize-type-descriptor (:name cls)))
             super-class (if-let [ext (:extends cls)]
-                          (class-to-pool ext)
+                          (class-to-pool (normalize-type-descriptor ext))
                           (m-result 0))
-            ifaces (m-seq (map class-to-pool (:implements cls)))]
+            ifaces (m-seq (map (comp class-to-pool normalize-type-descriptor)
+                               (:implements cls)))]
            (assoc cls
                   :this-class this-class
                   :super-class super-class
@@ -1278,7 +1325,9 @@
     (let [[[namei desci] tab]
           ((domonad state-m
              [n (utf-to-pool (str name))
-              d (utf-to-pool (method-descriptor-string (next descriptor)))]
+              d (utf-to-pool (method-descriptor-string
+                               (normalize-method-descriptor
+                                 descriptor)))]
              [n d])
            (:symtab @cref))
           mref (ref (assoc meth :name-index namei
@@ -1439,12 +1488,19 @@
         [nil (assoc code :max-locals k)]
         [nil code]))))
 
-;; normalize reflective entity specifiers
-;; used as arguments of invoke*, (put|get)(field|static)
-(defn normalize-arg [arg]
+(defmulti normalize-arg (fn [typ arg] typ))
+
+(def normalize-class-specifier
+     normalize-type-descriptor)
+
+(defmethod normalize-arg ::pool-class
+  [typ arg]
+  (normalize-class-specifier arg))
+
+(defn normalize-method-specifier [ms]
   (cond
-    (instance? Method arg)
-    (let [^Method meth arg
+    (instance? Method ms)
+    (let [^Method meth ms
           mname (symbol (.getName meth))
           mclass (symbol (.getName (.getDeclaringClass meth)))
           mdesc (normalize-method-descriptor
@@ -1452,21 +1508,50 @@
                            (seq (.getParameterTypes meth))])]
       [mclass mname mdesc])
 
-    (instance? Constructor arg)
-    (let [^Constructor ctor arg
+    (instance? Constructor ms)
+    (let [^Constructor ctor ms
           mname '<init>
           mclass (symbol (.getName (.getDeclaringClass ctor)))
           mdesc (normalize-method-descriptor
                   [:method :void (seq (.getParameterTypes ctor))])]
       [mclass mname mdesc])
 
+    :else
+    (let [[owner name desc] ms]
+      [(normalize-class-specifier owner)
+       name
+       (normalize-method-descriptor desc)])))
+
+(defmethod normalize-arg ::pool-method
+  [typ arg]
+  (normalize-method-specifier arg))
+
+(defmethod normalize-arg ::pool-iface-method
+  [typ arg]
+  (normalize-method-specifier arg))
+
+(defn normalize-field-specifier [arg]
+  (cond
     (instance? Field arg)
     (let [^Field fld arg
           fname (symbol (.getName fld))
           fclass (symbol (.getName (.getClass fld)))
           fdesc (normalize-type-descriptor (.getType fld))]
       [fclass fname fdesc])
-    :else arg))
+
+    :else
+    (let [[owner name desc] arg]
+      [(normalize-class-specifier owner)
+       name
+       (normalize-type-descriptor desc)])))
+
+(defmethod normalize-arg ::pool-field
+  [typ arg]
+  (normalize-field-specifier arg))
+
+(defmethod normalize-arg :default
+  [typ arg]
+  arg)
 
 ;; Does not convert labels to offsets (offset16, 32)
 (defn lookup-instr-arg [atyp asym locals code pool]
@@ -1497,6 +1582,7 @@
   (cond
     (= desc :long) 2
     (= desc :double) 2
+    (= desc :void) 0
     :else 1))
 
 (letfn [(--> [y xs] (zipmap xs (repeat y)))]
@@ -1516,7 +1602,9 @@
                :fstore-0 :fstore-1 :fstore-2
                :fstore-3 :istore :istore-0
                :istore-1 :istore-2 :istore-3
-               :areturn :ireturn :freturn])
+               :areturn :ireturn :freturn
+               :athrow :pop])
+      (--> +0 [:return :ret])
       (--> +1 [:bipush :sipush])
       (--> +0 [:checkcast :instanceof])
       (--> +0 [:daload :laload])
@@ -1528,82 +1616,79 @@
                :lload-3])
       (--> -2 [:dstore :dstore-0 :dstore-1 :dstore-2
                :dstore-3 :lstore :lstore-0 :lstore-1
-               :lstore-2 :lstore-3 :dreturn :lreturn])
+               :lstore-2 :lstore-3 :dreturn :lreturn :pop2])
       (--> -1 [:d2f :d2i :l2f :l2i])
       (--> +1 [:f2d :i2d :f2l :i2l])
       (--> +0 [:l2d :d2l])
+      (--> +0 [:i2b :i2c :i2f :i2s :f2i])
+      (--> +0 [:dneg :fneg :ineg :lneg])
+      (--> -3 [:dcmpg :dcmpl :lcmp])
+      (--> -1 [:fcmpg :fcmpl])
+      (--> +1 [:iconst-m1 :iconst-0 :iconst-1 :iconst-2
+               :iconst-3 :iconst-4 :iconst-5 :aconst-null
+               :fconst-0 :fconst-1 :fconst-2 :ldc :ldc-w
+               :new :dup :dup-x1 :dup-x2])
+      (--> +2 [:dconst-0 :dconst-1 :lconst-0 :lconst-1
+               :ldc2-w :dup2 :dup2-x1 :dup2-x2])
+      (--> +0 [:anewarray :newarray :arraylength])
       (--> -2 [:if-acmpeq :if-acmpne
                :if-icmpeq :if-icmpne
                :if-icmplt :if-icmpge
                :if-icmpgt :if-icmple])
+      (--> -1 [:ifeq :ifne :iflt :ifge :ifgt :ifle
+               :ifnonnull :ifnull])
+      (--> -1 [:lookupswitch :tableswitch])
+      (--> -1 [:monitorenter :monitorexit])
+      (--> +1 [:jsr :jsr-w])
+      (--> +0 [:goto :goto-w])
+      (--> +0 [:nop :swap :iinc])
       (--> -1 [:iadd :idiv :imul :irem :isub
                :iand :ior :ixor :ishl :ishr :iushr
-               :fadd :fdiv :fmul :frem :fsub]))))
+               :fadd :fdiv :fmul :frem :fsub])
+      (--> -2 [:ladd :ldiv :lmul :lrem
+               :land :lor :lxor])
+      (--> -1 [:ishl :ishr :iushr
+               :lshl :lshr :lushr]))))
 
 (defn stack-delta [op orig]
   (or (get +stack-delta+ op)
   (case op
-    :aconst-null +1
-    :anewarray   +0
-    :arraylength +0
-    :athrow      -1
-    :d2l         +0
-    (:dcmpg :dcmpl) -3
-    (:dconst-0 :dconst-1) +2
-    :dneg        +0
-    (:dup :dup-x1
-     :dup-x2)    +1
-    (:dup1 :dup2-x1
-     :dup2-x2)   +2
-    :f2i         +0
-    (:fcmpg :fcmpl) -1
-    (:fconst-0 :fconst-1
-     :fconst-2)  +1
-    :fneg        +0
-    (:getfield :getstatic :putfield :putstatic) ::RESOLVE-1
-    (:goto :goto-w) +0
-    (:i2b :i2c
-     :i2f :i2s)  +0
-    (:i2d :i2l)  +1
-     -1
-    (:iconst-m1 :iconst-0
-     :iconst-1 :iconst-2
-     :iconst-3 :iconst-4
-     :iconst-5)  +1
-     -2
-    (:ifeq :ifne
-     :iflt :ifge
-     :ifgt :ifle
-     :ifnonnull
-     :ifnull)   -1
-    :iinc       +0
-    :ineg       +0
-    (:invokedynamic :invokeinterface
-     :invokespecial :invokestatic
-     :invokevirtual) ::RESOLVE-n
-    (:jsr :jsr-w) +1
-    :l2d        +0
-    (:ladd :ldiv :lmul
-     :lrem :lsub :land
-     :lor :lxor ) -2
-    (:ishl :ishr :iushr) -1
-    :lcmp       -3
-    (:lconst-0 :lconst-1) +2
-    (:ldc :ldc-w) +1
-    :ldc2-w     +2
-    :lneg       +0
-    (:lookupswitch :tableswitch) -1
-    (:monitorenter :monitorexit) -1
+    :getfield
+    (let [[fspec] orig
+          [_ _ tdesc] fspec]
+      (if (#{:long :double} tdesc) 1 0))
+
+    :getstatic
+    (let [[fspec] orig
+          [_ _ tdesc] fspec]
+      (if (#{:long :double} tdesc) 2 1))
+
+    :putfield
+    (let [[fspec] orig
+          [_ _ tdesc] fspec]
+      (if (#{:long :double} tdesc) -3 -2))
+
+    :putstatic
+    (let [[fspec] orig
+          [_ _ tdesc] fspec]
+      (if (#{:long :double} tdesc) -2 -1))
+
+    (:invokeinterface :invokevirtual :invokespecial)
+    (let [[mspec] orig
+          [_ _ mdesc] mspec
+          [_ ret args] mdesc]
+      (- (sizeof-desc ret)
+         1 (reduce + (map sizeof-desc args))))
+
+    :invokestatic
+    (let [[mspec] orig
+          [_ _ mdesc] mspec
+          [_ ret args] mdesc]
+      (- (sizeof-desc ret)
+         (reduce + (map sizeof-desc args))))
+
     :multianewarray (let [[idx dim] orig]
                       (- (dec dim)))
-    :new        +1
-    :newarray   +0
-    :nop        +0
-    :pop        -1
-    :pop2       -2
-    :ret        +0
-    :return     +0
-    :swap       +0
     :wide
     (let [[wop] orig]
       (stack-delta wop orig)))))
@@ -1691,16 +1776,15 @@
           pool (:symtab @cref)
           currpc (:pc code)
           {:keys [op args]} instr
-          args (map normalize-arg args)
+          atyp (next (+opcodes+ op))
+          norm (map normalize-arg (concat atyp (repeat ::null)) args)
           {:keys [locals]} ctx ; TODO
           arg-m (with-monad state-m
                   (m-map (fn [[t a]]
                            (lookup-instr-arg t a ctx code pool))
-                         (map vector
-                              (next (+opcodes+ op))
-                              args)))]
+                         (map vector atyp norm)))]
       (let [[argidx ntab] (arg-m pool)
-            ninstr (emit-modify (assoc instr :args argidx) args)
+            ninstr (emit-modify (assoc instr :args argidx) norm)
             [nextpc ncode] ((domonad state-m
                               [nextpc (advance
                                         (ins-size currpc instr
@@ -1906,7 +1990,6 @@
     (first (get labels target))))
 
 (defn next-block [blocks b]
-  (println "next-block" blocks "/" b)
   (ffirst (subseq blocks > b)))
 
 (defn block-code [asm blocks b]
@@ -2008,7 +2091,6 @@
     (struct graph/directed-graph (keys all-neighbors) all-neighbors)))
 
 (defn block-stack-size [code stack-in]
-  (println stack-in "--ssiz-->" code)
   (reduce (fn [[curr high] {delta :stack}]
             (let [nxt (+ curr delta)]
               [nxt (max high nxt)]))
@@ -2017,7 +2099,6 @@
 
 ;; TODO: (into init (for [x exception-handlers] [x 1]))
 (defn method-stack-size [block-graph code]
-  (println "Will walk" (graph/lazy-walk block-graph #{0} #{}))
   (let [init {0 0}
         calc (with-monad state-m
                (m-map #(fn [stacks]
@@ -2030,7 +2111,6 @@
                                            (repeat out)))]))
                       (graph/lazy-walk block-graph (keys init) #{})))
         [siz exit] (calc init)]
-    (println "Got siz =" siz "entries =" exit)
     (reduce max siz)))
         
 

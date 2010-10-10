@@ -1,6 +1,7 @@
 (ns org.subluminal.class-file
   (:require (org.subluminal [binfmt :as bin])
-            (clojure string set))
+            (clojure string set)
+            (clojure.contrib [graph :as graph]))
   (:use (clojure.contrib monads))
   (:import (java.io ByteArrayInputStream DataInputStream InputStream
                     ByteArrayOutputStream DataOutputStream)
@@ -1899,15 +1900,13 @@
                        [(map unify1 loc ploc) (map unify1 stak pstak)])]
         [nil (assoc-in [code :frames pc] curr)]))))
 
-(defn stack-usage [ins max curr]
-  [max curr])
-
 (defn target-offset [target pc labels]
   (if (integer? target)
     (+ pc target)
     (first (get labels target))))
 
 (defn next-block [blocks b]
+  (println "next-block" blocks "/" b)
   (ffirst (subseq blocks > b)))
 
 (defn block-code [asm blocks b]
@@ -1915,7 +1914,7 @@
     (subseq asm >= b < nxt)
     (subseq asm >= b)))
 
-(def +jump-ops+ #{:goto :goto-w})
+(def +jump-ops+ #{:goto :goto-w :jsr :jsr-w})
 (def +branch-ops+ #{:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne
                     :if-icmplt :if-icmpge :if-icmpgt :if-icmple
                     :ifeq :ifne :iflt :ifge :ifgt :ifle
@@ -1995,13 +1994,58 @@
           ; default
           (recur blocks (next ins) false))))))
 
+(defn map-keys [f m]
+  (into (sorted-map)
+        (map vector (keys m) (map f (keys m)))))
+
+(defn block-graph [blocks code]
+  (let [all-neighbors
+        (map-keys (partial block-neighbors
+                           (:disasm code)
+                           blocks
+                           (:labels code))
+                  blocks)]
+    (struct graph/directed-graph (keys all-neighbors) all-neighbors)))
+
+(defn block-stack-size [code stack-in]
+  (println stack-in "--ssiz-->" code)
+  (reduce (fn [[curr high] {delta :stack}]
+            (let [nxt (+ curr delta)]
+              [nxt (max high nxt)]))
+          [stack-in stack-in]
+          (vals code)))
+
+;; TODO: (into init (for [x exception-handlers] [x 1]))
+(defn method-stack-size [block-graph code]
+  (println "Will walk" (graph/lazy-walk block-graph #{0} #{}))
+  (let [init {0 0}
+        calc (with-monad state-m
+               (m-map #(fn [stacks]
+                         (let [[out high]
+                               (block-stack-size
+                                 (block-code code (:neighbors block-graph) %)
+                                 (stacks %))]
+                           [high (merge stacks
+                                   (zipmap (graph/get-neighbors block-graph %)
+                                           (repeat out)))]))
+                      (graph/lazy-walk block-graph (keys init) #{})))
+        [siz exit] (calc init)]
+    (println "Got siz =" siz "entries =" exit)
+    (reduce max siz)))
+        
+
 ;;;; Top-level interface
 
-;; refine, compute block graph, generate stack map, emit bytecode
+;; refine, compute block graph, generate stack map
 (defn assemble-method [mref]
   (dosync
     (when-not (some #{:abstract :native} (:flags @mref))
-      (refine mref))))
+      (refine mref)
+      (let [code (get-in @mref [:attributes 0])
+            blocks (basic-blocks (:disasm code) (:labels code))
+            graph (block-graph blocks code)
+            stack (method-stack-size graph (:disasm code))]
+        (alter mref assoc-in [:attributes 0 :max-stack] stack)))))
 
 (defn assemble-class [cref]
   (dosync

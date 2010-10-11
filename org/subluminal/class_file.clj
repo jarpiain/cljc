@@ -422,7 +422,10 @@
 
 ;; Used to calculate the length field when writing
 (defmulti attribute-length (fn [at inf] at))
-(defmethod attribute-length :default [at inf] 0)
+(defmethod attribute-length :default
+  [at inf]
+  (println "Unknown attribute!")
+  0)
 
 (defmethod attribute-length "ConstantValue"
   [at inf]
@@ -435,6 +438,10 @@
 (defmethod attribute-length "Exceptions"
   [at inf]
   (+ 2 (* 2 (count (:index-table inf)))))
+
+(defmethod attribute-length "SourceFile"
+  [at inf]
+  2)
 
 (bin/defbinary [attribute-info pool]
   [:name-index ::bin/uint16 {:constraint #(< 0 % (count pool))}]
@@ -1405,6 +1412,8 @@
 (defmethod const-to-pool Double [c] (double-to-pool c))
 (defmethod const-to-pool String [c] (string-to-pool c))
 
+(declare add-attribute)
+
 (defn init-class [cls]
   (let [[res syms]
         ((domonad state-m
@@ -1413,15 +1422,23 @@
                           (class-to-pool (normalize-type-specifier ext))
                           (m-result 0))
             ifaces (m-seq (map (comp class-to-pool normalize-type-specifier)
-                               (:implements cls)))]
+                               (:implements cls)))
+            [src atr]  (if-let [file (:source-file cls)]
+                         (m-seq [(utf-to-pool file)
+                                 (utf-to-pool "SourceFile")])
+                         (m-result nil))]
            (assoc cls
+                  :attributes (if src
+                                (conj (:attributes cls)
+                                  {:name-index atr
+                                   :name "SourceFile"
+                                   :file-index src})
+                                (:attributes cls))
                   :this-class this-class
                   :super-class super-class
                   :interfaces (vec ifaces)))
           (:symtab cls))]
     (assoc res :symtab syms)))
-
-(declare add-attribute)
 
 (defn add-field [cref {:keys [name descriptor flags constant] :as fld}]
   (dosync

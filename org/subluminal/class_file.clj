@@ -432,6 +432,10 @@
   [at inf]
   (+ 12 (:code-length inf)))
 
+(defmethod attribute-length "Exceptions"
+  [at inf]
+  (+ 2 (* 2 (count (:index-table inf)))))
+
 (bin/defbinary [attribute-info pool]
   [:name-index ::bin/uint16 {:constraint #(< 0 % (count pool))}]
   [:name ::null {:transient (pool-string pool name-index)}]
@@ -461,7 +465,7 @@
         [:attributes [::attribute-info pool] {:times attributes-count}])
 
     (= name "Exceptions")
-    (do [:num-exceptions ::bin/uint16 {:aux (count exceptions)}]
+    (do [:num-exceptions ::bin/uint16 {:aux (count index-table)}]
         [:index-table ::bin/uint16 {:times num-exceptions}]
         [:exceptions ::null
           {:transient (vec (map #(to-symbol (class-name pool %))
@@ -1457,7 +1461,7 @@
     (assoc ctx :size size :vars vars)))
 
 ;; XXX assembler assumes the Code attribute is at index 0
-(defn add-method [cref {:keys [name descriptor flags params] :as meth}]
+(defn add-method [cref {:keys [name descriptor flags params throws] :as meth}]
   (dosync
     (let [[_ _ args :as desc] (normalize-method-descriptor descriptor)
           bindings (interleave (concat params (repeatedly gensym)) args)
@@ -1476,6 +1480,8 @@
                                 :descriptor-index desci))]
       (alter cref #(-> % (update-in [:methods] conj mref)
                          (assoc :symtab tab)))
+
+      ;; Code attribute must come first
       (when-not (some #{:abstract :native} flags)
         (add-attribute cref mref {:name "Code"
                                   :labels {}
@@ -1487,6 +1493,17 @@
                                   :ctx init-ctx
                                   :exception-table []
                                   :attributes []}))
+
+      (when throws
+        (let [[idx tab]
+              ((with-monad state-m
+                (m-map class-to-pool
+                       (map normalize-type-specifier throws)))
+               (:symtab @cref))]
+          (alter cref assoc :symtab tab)
+          (add-attribute cref mref {:name "Exceptions"
+                                    :index-table (vec idx)})))
+
       mref)))
 
 ;;;; First pass of the assembler

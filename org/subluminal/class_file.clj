@@ -2316,9 +2316,10 @@
           [stack-in stack-in]
           (vals code)))
 
-;; TODO: (into init (for [x exception-handlers] [x 1]))
-(defn method-stack-size [block-graph code]
-  (let [init {0 0}
+(defn method-stack-size [block-graph code labels extab]
+  (let [init (into {0 0}
+                   (for [{handler :handler-pc} extab]
+                     [(get labels handler) 1]))
         calc (with-monad state-m
                (m-map #(fn [stacks]
                          (let [[out high]
@@ -2390,9 +2391,10 @@
       (refine mref)
       (let [code (get-in @mref [:attributes 0])
             labels (into {} (for [[k [v v]] (:labels code)] [k v]))
+            extab (:exception-table code)
             blocks (basic-blocks (:asm code) (:labels code))
             graph (block-graph blocks code)
-            stack (method-stack-size graph (:asm code))]
+            stack (method-stack-size graph (:asm code) labels extab)]
         (alter mref update-in [:attributes 0 :exception-table]
                (fn [xs]
                  (vec (map (fn [{:keys [start-pc end-pc

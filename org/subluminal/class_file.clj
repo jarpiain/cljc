@@ -8,33 +8,6 @@
            (java.lang.reflect Field Method Constructor)
            (java.nio ByteBuffer)))
 
-(defn normalized-clazz? [cls]
-  (or (symbol? cls)  ; class or iface
-      (keyword? cls) ; primitive
-      (and (seq? cls)
-           (= (first cls) :array)
-           (normalized-clazz? (second cls)))))
-
-(defn normalized-fldspec? [fld]
-  (let [[owner name desc] fld]
-    (and owner name desc
-         (normalized-clazz? owner)
-         (symbol? name)
-         (normalized-clazz? desc))))
-
-(defn normalized-methdesc? [meth]
-  (let [[tag ret args] meth]
-    (and (= tag :method)
-         (normalized-clazz? ret)
-         (every? normalized-clazz? args))))
-
-(defn normalized-methspec? [meth]
-  (let [[owner name desc] meth]
-    (and owner name desc
-         (normalized-clazz? owner)
-         (symbol? name)
-         (normalized-methdesc? desc))))
-
 (declare disasm to-symbol class-name pool-string)
 
 ;;;; Parser for descriptor and signature strings
@@ -137,44 +110,6 @@
      rp (match-char \))
      ret <field-descriptor>]
     (list 'method ret args)))
-
-#_(defn class-type-descriptor [^String cname]
-  (str "L" (.replace cname \. \/) ";"))
-
-(defn field-descriptor-string [desc]
-  {:pre (normalized-clazz? desc)}
-  (if (class? desc) (throw (NullPointerException. "lsnateonlsm")))
-  (cond
-    (keyword? desc)
-    (case desc
-      :byte "B", :char "C",
-      :double "D", :float "F",
-      :int "I", :long "J"
-      :short "S", :void "V",
-      :boolean "Z")
-
-    (symbol? desc)
-    (str "L" (.replace (name desc) \. \/) ";")
-
-    ;(class? desc)
-    ;(class-type-descriptor (.getName desc))
-
-    :else
-    (let [[atag component] desc]
-      (case atag :array (str "[" (field-descriptor-string component))))))
-
-(defn method-descriptor-string [desc]
-  {:pre (normalized-methdesc? desc)}
-  (let [[_ ret args] desc]
-    (str "(" (apply str (map field-descriptor-string args)) ")"
-         (field-descriptor-string ret))))
-
-(defn descriptor-string [desc]
-  {:pre [(or (normalized-clazz? desc)
-             (normalized-methdesc? desc))]}
-  (if (and (sequential? desc) (= (first desc) :method))
-    (method-descriptor-string desc)
-    (field-descriptor-string desc)))
 
 ;; Parse signatures
 
@@ -573,6 +508,8 @@
     :else
     [:info [::bin/byte-array length]]))
 
+;; StackMapTable attribute
+
 (defn frame-tag [frame-type]
   (cond (<= 0 frame-type 63) :same
         (<= 64 frame-type 127) :same-locals-1-stack-item
@@ -628,6 +565,8 @@
     :default
     (do)))
 
+;; Annotations attribute
+
 (bin/defbinary [parameter-annotations pool]
   [:num-annotations ::bin/uint16 {:aux (count parameter-annotations)}]
   [internal [::annotation pool] {:times num-annotations}])
@@ -674,6 +613,8 @@
   [:num-value-pairs ::bin/uint16 {:aux (count value-pairs)}]
   [:value-pairs [::attribute-property pool] {:times num-value-pairs}])
 
+;; InnerClasses attribute
+
 (bin/defbinary [inner-class pool]
   [:inner-class-info-index ::bin/uint16 {:constraint #(< 0 % (count pool))
                                          :aux 0}]
@@ -690,6 +631,8 @@
      {:bitmask {:public 0 :private 1 :protected 2
                 :static 3 :final 4 :interface 9 :abstract 10
                 :synthetic 12 :annotation 13 :enum 14}}])
+
+;; LocalVarTable, LineNumberTable, Exceptions
 
 (bin/defbinary [local-var-info pool]
   [:start-pc ::bin/uint16]
@@ -725,9 +668,9 @@
                                '* ; finally
                                (to-symbol (class-name pool catch-type)))}])
 
-;;;; Disassembler
+;;;; Bytecode disassembler
 
-(bin/alias-tag! ::bin/uint8 ::local-var)
+(bin/alias-tag! ::bin/uint8  ::local-var)
 (bin/alias-tag! ::bin/uint16 ::pool-class)
 (bin/alias-tag! ::bin/uint16 ::pool-field)
 (bin/alias-tag! ::bin/uint16 ::pool-method)
@@ -736,6 +679,7 @@
 (bin/alias-tag! ::bin/uint8  ::pool-constant8)
 (bin/alias-tag! ::bin/uint16 ::pool-constant16)
 
+;; The zero byte of :invokeinterface
 (bin/defprimitive zero [buf obj]
   (.get buf)
   (.put buf (byte 0)))
@@ -992,7 +936,7 @@
          +wide-ops+)))
 
 (defn- lookup-pool
-  "Lookup symbolic representation of an instruction field
+  "Lookup symbolic representation of an instruction argument
    from the constant pool"
   [pool typ raw]
   (case typ
@@ -1080,6 +1024,188 @@
       (bin/read-binary ::ClassFile (bin-slurp input)))))
 
 ;;;; Assembler
+
+;; A /type specifier/ is a Class object,
+;; symbol naming a fully qualified class,
+;; a vector [:array <component-type-specifier>],
+;; or one of the symbols :int :long :void, etc.
+;;
+;; Note that :void can be only used as the return
+;; type specifier in a method descriptor.
+;;
+;; The normalized form of a type specifier
+;; doesn't contain any Class objects.
+;;
+;; Type specifiers can be used both as (field) type descriptors
+;; (UTF8_info items formatted like "I" or "[[D"
+;; or "Ljava/lang/Object;" in the constant pool) and as
+;; class specifiers (Class_info items referring to a strings
+;; formatted like "java/lang/Object" or "[I" or
+;; "[Ljava/lang/Object;").
+
+(defn type-specifier? [spec]
+  (or (class? spec)
+      (symbol? spec)
+      (keyword? spec)
+      (and (seq spec)
+           (= (first spec) :array)
+           (type-specifier? (second spec)))))
+
+(defn normalized-clazz? [cls]
+  (or (symbol? cls)  ; class or iface
+      (keyword? cls) ; primitive
+      (and (seq? cls)
+           (= (first cls) :array)
+           (normalized-clazz? (second cls)))))
+
+(def +primitive-descriptors+
+     {Byte/TYPE :byte Short/TYPE :short Integer/TYPE :int
+      Long/TYPE :long Float/TYPE :float Double/TYPE :double
+      Character/TYPE :char Void/TYPE :void Boolean/TYPE :boolean})
+
+(defn normalize-type-specifier [desc]
+  {:post [(normalized-clazz? %)]}
+  (cond
+    (class? desc)
+    (let [^Class cls desc]
+      (cond
+        (.isPrimitive cls)
+        (+primitive-descriptors+ cls)
+        (.isArray cls)
+        [:array (normalize-type-specifier (.getComponentType cls))]
+        :else
+        (symbol (.getName cls))))
+
+    (and (seq? desc) (= (first desc) :array))
+    [:array (normalize-type-specifier (second desc))]
+
+    :else
+    desc))
+
+(defn type-descriptor-string [desc]
+  {:pre (normalized-clazz? desc)}
+  (cond
+    (keyword? desc)
+    (case desc
+      :byte "B", :char "C",
+      :double "D", :float "F",
+      :int "I", :long "J"
+      :short "S", :void "V",
+      :boolean "Z")
+
+    (symbol? desc)
+    (str "L" (.replace (name desc) \. \/) ";")
+
+    ;(class? desc)
+    ;(class-type-descriptor (.getName desc))
+
+    :else
+    (let [[atag component] desc]
+      (case atag :array (str "[" (type-descriptor-string component))))))
+
+(defn class-descriptor-string [desc]
+  {:pre (normalized-clazz? desc)}
+  (if (symbol? desc)
+    (.replace (name desc) \. \/)
+    (type-descriptor-string desc)))
+
+;; A /field specifier/ is either a java.lang.reflect.Field object
+;; or a vector [owner name type] where owner is a class specifier,
+;; name is a symbol and type is a type specifier. Field specifiers
+;; are used as arguments of the (get/put)static and (get/put)field
+;; instructions.
+
+(defn normalized-fldspec? [fld]
+  (let [[owner name desc] fld]
+    (and owner name desc
+         (normalized-clazz? owner)
+         (symbol? name)
+         (normalized-clazz? desc))))
+
+(defn normalize-field-specifier [arg]
+  (cond
+    (instance? Field arg)
+    (let [^Field fld arg
+          fname (symbol (.getName fld))
+          fclass (symbol (.getName (.getDeclaringClass fld)))
+          fdesc (normalize-type-specifier (.getType fld))]
+      [fclass fname fdesc])
+
+    :else
+    (let [[owner name desc] arg]
+      [(normalize-type-specifier owner)
+       name
+       (normalize-type-specifier desc)])))
+
+;; A /method descriptor/ is a vector
+;; [:method <return-type> [<argument-type>*]]
+;; where the return and argument-types are
+;; type specifiers.
+;;
+;; Method descriptors are used in defining methods
+;; and as parts of method specifiers.
+;; The descriptor is encoded like
+;; "([Ljava/lang/String;)V"
+
+(defn normalized-methdesc? [meth]
+  (and
+    (sequential? meth)
+    (let [[tag ret args] meth]
+      (and (= tag :method)
+           (normalized-clazz? ret)
+           (every? normalized-clazz? args)))))
+
+(defn normalize-method-descriptor [desc]
+  {:post [(normalized-methdesc? %)]}
+  (let [[_ ret args] desc]
+    [:method (normalize-type-specifier ret)
+             (vec (map normalize-type-specifier args))]))
+
+(defn method-descriptor-string [desc]
+  {:pre (normalized-methdesc? desc)}
+  (let [[_ ret args] desc]
+    (str "(" (apply str (map type-descriptor-string args)) ")"
+         (type-descriptor-string ret))))
+
+;; A /method specifier/ is a java.lang.reflect.Method,
+;; a java.lang.reflect.Constructor, or a vector
+;; [owner name desc] where owner is a class specifier,
+;; name is a symbol and desc is a method descriptor.
+;;
+;; Method specifiers are used as arguments of the
+;; invoke* instructions.
+
+(defn normalized-methspec? [meth]
+  (let [[owner name desc] meth]
+    (and owner name desc
+         (normalized-clazz? owner)
+         (symbol? name)
+         (normalized-methdesc? desc))))
+
+(defn normalize-method-specifier [ms]
+  (cond
+    (instance? Method ms)
+    (let [^Method meth ms
+          mname (symbol (.getName meth))
+          mclass (symbol (.getName (.getDeclaringClass meth)))
+          mdesc (normalize-method-descriptor
+                  [:method (.getReturnType meth)
+                           (seq (.getParameterTypes meth))])]
+      [mclass mname mdesc])
+
+    (instance? Constructor ms)
+    (let [^Constructor ctor ms
+          mname '<init>
+          mclass (symbol (.getName (.getDeclaringClass ctor)))
+          mdesc (normalize-method-descriptor
+                  [:method :void (seq (.getParameterTypes ctor))])]
+      [mclass mname mdesc])
+
+    :else
+    (let [[owner name desc] ms]
+      [(normalize-type-specifier owner)
+       name
+       (normalize-method-descriptor desc)])))
 
 (def *assembling* {})
 
@@ -1169,6 +1295,15 @@
           _ (update-val :strings #(assoc % s (count pool)))]
          (count pool)) tab))))
 
+;; Used both in Method_info and Field_info structures
+(defn descriptor-string [desc]
+  {:pre [(or (normalized-clazz? desc)
+             (normalized-methdesc? desc))]}
+  (if (and (sequential? desc) (= (first desc) :method))
+    (method-descriptor-string desc)
+    (type-descriptor-string desc)))
+
+;; Name-and-type pool entry
 (defn desc-to-pool [d]
   {:pre [(let [[na de] d]
            (and (symbol? na)
@@ -1194,44 +1329,12 @@
     (if-let [idx (get (:classes tab) cls)]
       [idx tab]
       ((domonad state-m
-         [stri (utf-to-pool (name cls))
+         [stri (utf-to-pool (class-descriptor-string cls))
           pool (fetch-val :pool)
           _ (update-val :pool #(conj % {:tag :class :name-index stri}))
           _ (update-val :classes #(assoc % cls (count pool)))]
          (count pool)) tab))))
 
-(def +primitive-descriptors+
-     {Byte/TYPE :byte Short/TYPE :short Integer/TYPE :int
-      Long/TYPE :long Float/TYPE :float Double/TYPE :double
-      Character/TYPE :char Void/TYPE :void Boolean/TYPE :boolean})
-
-(defn normalize-type-descriptor [desc]
-  {:post [(normalized-clazz? %)]}
-  (cond
-    (class? desc)
-    (let [^Class cls desc]
-      (cond
-        (.isPrimitive cls)
-        (+primitive-descriptors+ cls)
-        (.isArray cls)
-        [:array (normalize-type-descriptor (.getComponentType cls))]
-        :else
-        (symbol (.getName cls))))
-
-    (and (seq? desc) (= (first desc) :array))
-    [:array (normalize-type-descriptor (second desc))]
-
-    :else
-    desc)) ; must be :primitive or 'qualified.Symbol
-
-(defn normalize-method-descriptor [desc]
-  {:post [(normalized-methdesc? %)]}
-  (let [[_ ret args] desc]
-    [:method (normalize-type-descriptor ret)
-             (vec (map normalize-type-descriptor args))]))
-
-;; class Foo { X bar; }
-;; --> [Foo 'bar X]
 (defn field-to-pool [[fclass fname fdesc :as fld]]
   {:pre [(normalized-fldspec? fld)]}
   (fn [tab]
@@ -1247,9 +1350,6 @@
           _ (update-val :fields #(assoc % fld (count pool)))]
          (count pool)) tab))))
 
-
-;; class Foo { X bar(Y) {...} }
-;; --> [Foo 'bar [:method X [Y]]]
 (defn method-to-pool [[mclass mname mdesc :as meth] key]
   {:pre [(normalized-methspec? meth)]}
   (fn [tab]
@@ -1267,14 +1367,12 @@
           _ (update-val key #(assoc % meth (count pool)))]
          (count pool)) tab))))
 
+;; Argument of :ldc instruction
 (defmulti const-to-pool class)
 
 ;; Must be a class specifier
 (defmethod const-to-pool :default [c]
-  (class-to-pool (normalize-type-descriptor c)))
-
-; (defmethod const-to-pool Class [c]
-;   (class-to-pool (normalize-type-descriptor c)))
+  (class-to-pool (normalize-type-specifier c)))
 
 (defmethod const-to-pool Integer [c] (int-to-pool c))
 (defmethod const-to-pool Long [c] (long-to-pool c))
@@ -1285,11 +1383,11 @@
 (defn init-class [cls]
   (let [[res syms]
         ((domonad state-m
-           [this-class (class-to-pool (normalize-type-descriptor (:name cls)))
+           [this-class (class-to-pool (normalize-type-specifier (:name cls)))
             super-class (if-let [ext (:extends cls)]
-                          (class-to-pool (normalize-type-descriptor ext))
+                          (class-to-pool (normalize-type-specifier ext))
                           (m-result 0))
-            ifaces (m-seq (map (comp class-to-pool normalize-type-descriptor)
+            ifaces (m-seq (map (comp class-to-pool normalize-type-specifier)
                                (:implements cls)))]
            (assoc cls
                   :this-class this-class
@@ -1303,7 +1401,7 @@
     (let [[[namei desci] tab]
           ((domonad state-m
              [n (utf-to-pool (str name))
-              d (utf-to-pool (field-descriptor-string descriptor))]
+              d (utf-to-pool (type-descriptor-string descriptor))]
              [n d])
            (:symtab @cref))
           fref (ref (assoc fld :name-index namei
@@ -1320,6 +1418,7 @@
       (alter cref assoc :symtab tab)
       attr)))
 
+;; XXX assembler assumes the Code attribute is at index 0
 (defn add-method [cref {:keys [name descriptor flags] :as meth}]
   (dosync
     (let [[[namei desci] tab]
@@ -1347,17 +1446,28 @@
                                   :attributes []}))
       mref)))
 
+;;;; First pass of the assembler
+;; Add instruction arguments to constant pool;
+;; note stack usage of each instruction;
+;; calculate an interval of possible offsets
+;; for each label; make a few simple transformations
+;; between short and long instruction forms
+
 (defn advance [[min max]]
   (fn [code]
     (let [[l r] (:pc code)]
       [nil (assoc code :pc [(+ l min) (+ r max)])])))
 
-(defn bound-interval? [[s1 s2] [d1 d2] [low hi]]
+(defn bound-interval?
+  "Return true if low <= dest - src <= high
+  whenever dest and src lie within specified intervals"
+  [[s1 s2] [d1 d2] [low hi]]
   (and (<= low (- d1 s1) hi)
        (<= low (- d2 s1) hi)
        (<= low (- d1 s2) hi)
        (<= low (- d2 s2) hi)))
 
+;; No arguments
 (def +simple-instructions+
    #{:aaload :aastore :aconst-null :aload-0 :aload-1 :aload-2 :aload-3
      :areturn :arraylength :astore-0 :astore-1 :astore-2 :astore-3
@@ -1381,47 +1491,9 @@
 
 (defstruct instruction :op :args :stack)
 
-(defn exact-size
-  [{:keys [op args] :as ins} pc]
-  (if (contains? +simple-instructions+ op)
-    1
-    (case op
-      (:aload :astore :bipush :dload :dstore :fload :fstore :iload :istore
-       :ldc :lload :lstore :newarray :ret)
-      2
-      (:anewarray :checkcast :getfield :getstatic :iinc :instanceof
-       :invokedynamic :invokespecial :invokestatic :invokevirtual
-       :ldc-w :ldc2-w :new :putfield :putstatic :sipush
-       :goto :jsr)
-      3
-      (:multinewarray)
-      4
-      (:invokeinterface :jsr-w :goto-w)
-      5
-
-      (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
-       :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
-       :ifgt :ifle :ifnonnull :ifnull)
-      3
-
-      :lookupswitch
-      (let [[_ default count] args 
-            fix (+ 9 (* 8 count))
-            pad (bin/padd4 (inc pc))]
-        (+ fix pad))
-
-      :tableswitch
-      (let [[_ default low high] args
-            fix (+ 13 (* 4 (inc (- high low))))
-            pad (bin/padd4 (inc pc))]
-        (+ fix pad))
-
-      :wide
-      (let [[wop] args]
-        (if (= wop :iinc) 6 4)))))
-
 (defn ins-size
-  "Estimate size of one instruction"
+  "Estimate size of one instruction.
+  Called on first pass of the assembler."
   [pc {op :op, [target :as args] :args, :as ins} labels]
   (if (contains? +simple-instructions+ op)
     [1 1]
@@ -1490,37 +1562,9 @@
 
 (defmulti normalize-arg (fn [typ arg] typ))
 
-(def normalize-class-specifier
-     normalize-type-descriptor)
-
 (defmethod normalize-arg ::pool-class
   [typ arg]
-  (normalize-class-specifier arg))
-
-(defn normalize-method-specifier [ms]
-  (cond
-    (instance? Method ms)
-    (let [^Method meth ms
-          mname (symbol (.getName meth))
-          mclass (symbol (.getName (.getDeclaringClass meth)))
-          mdesc (normalize-method-descriptor
-                  [:method (.getReturnType meth)
-                           (seq (.getParameterTypes meth))])]
-      [mclass mname mdesc])
-
-    (instance? Constructor ms)
-    (let [^Constructor ctor ms
-          mname '<init>
-          mclass (symbol (.getName (.getDeclaringClass ctor)))
-          mdesc (normalize-method-descriptor
-                  [:method :void (seq (.getParameterTypes ctor))])]
-      [mclass mname mdesc])
-
-    :else
-    (let [[owner name desc] ms]
-      [(normalize-class-specifier owner)
-       name
-       (normalize-method-descriptor desc)])))
+  (normalize-type-specifier arg))
 
 (defmethod normalize-arg ::pool-method
   [typ arg]
@@ -1529,21 +1573,6 @@
 (defmethod normalize-arg ::pool-iface-method
   [typ arg]
   (normalize-method-specifier arg))
-
-(defn normalize-field-specifier [arg]
-  (cond
-    (instance? Field arg)
-    (let [^Field fld arg
-          fname (symbol (.getName fld))
-          fclass (symbol (.getName (.getClass fld)))
-          fdesc (normalize-type-descriptor (.getType fld))]
-      [fclass fname fdesc])
-
-    :else
-    (let [[owner name desc] arg]
-      [(normalize-class-specifier owner)
-       name
-       (normalize-type-descriptor desc)])))
 
 (defmethod normalize-arg ::pool-field
   [typ arg]
@@ -1554,7 +1583,12 @@
   arg)
 
 ;; Does not convert labels to offsets (offset16, 32)
-(defn lookup-instr-arg [atyp asym locals code pool]
+;; since the offset is not yet known
+(defn lookup-instr-arg
+  "Converts symbolic references and literal
+  values to local variable and constant pool indices.
+  Called on first pass of the assembler."
+  [atyp asym locals]
 ;  (with-monad state-m
     (case atyp
       ::local-var (with-monad state-m (m-result (locals asym)))
@@ -1650,7 +1684,11 @@
       (--> -1 [:ishl :ishr :iushr
                :lshl :lshr :lushr]))))
 
-(defn stack-delta [op orig]
+(defn stack-delta
+  "Number of words added to or removed from the operand stack
+  as a result of this instruction. Called on first pass
+  of the assembler."
+  [op orig]
   (or (get +stack-delta+ op)
   (case op
     :getfield
@@ -1697,9 +1735,12 @@
 
 ;; Convert Xload n <--> Xload_n, etc.
 ;; Do NOT convert bipush -> sipush
-;; Do NOT convert goto <-> goto-w (see #'refine)
 ;; invokeinterface, wide, *switch need the original (symbolic) arguments
-(defn emit-modify [{:keys [op args] :as ins} orig]
+(defn emit-modify
+  "Convert an instruction into shorter or longer format
+  if possible or necessary. Called on first pass
+  of the assembler."
+  [{:keys [op args] :as ins} orig]
   (let [delta (stack-delta op orig)
         ins (assoc ins :stack delta)]
     (if (contains? +simple-instructions+ op)
@@ -1781,7 +1822,7 @@
           {:keys [locals]} ctx ; TODO
           arg-m (with-monad state-m
                   (m-map (fn [[t a]]
-                           (lookup-instr-arg t a ctx code pool))
+                           (lookup-instr-arg t a ctx))
                          (map vector atyp norm)))]
       (let [[argidx ntab] (arg-m pool)
             ninstr (emit-modify (assoc instr :args argidx) norm)
@@ -1826,7 +1867,52 @@
 
      :else
      (let [[op & args] item]
-       (emit1 cref mref {:op op :args args} ctx)))))
+       (emit1 cref mref (struct instruction op args nil) ctx)))))
+
+;;;; Second pass of the assembler
+;; Calculate exact offset of each instruction and label;
+;; transform short jumps into long jumps if necessary
+
+(defn exact-size
+  "Returns exact size in bytes of an instruction.
+  Called on the second pass of the assembler."
+  [{:keys [op args] :as ins} pc]
+  (if (contains? +simple-instructions+ op)
+    1
+    (case op
+      (:aload :astore :bipush :dload :dstore :fload :fstore :iload :istore
+       :ldc :lload :lstore :newarray :ret)
+      2
+      (:anewarray :checkcast :getfield :getstatic :iinc :instanceof
+       :invokedynamic :invokespecial :invokestatic :invokevirtual
+       :ldc-w :ldc2-w :new :putfield :putstatic :sipush
+       :goto :jsr)
+      3
+      (:multinewarray)
+      4
+      (:invokeinterface :jsr-w :goto-w)
+      5
+
+      (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
+       :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
+       :ifgt :ifle :ifnonnull :ifnull)
+      3
+
+      :lookupswitch
+      (let [[_ default count] args 
+            fix (+ 9 (* 8 count))
+            pad (bin/padd4 (inc pc))]
+        (+ fix pad))
+
+      :tableswitch
+      (let [[_ default low high] args
+            fix (+ 13 (* 4 (inc (- high low))))
+            pad (bin/padd4 (inc pc))]
+        (+ fix pad))
+
+      :wide
+      (let [[wop] args]
+        (if (= wop :iinc) 6 4)))))
 
 (def +negate-op+
   (let [pairs {:if-acmpeq :if-acmpne,
@@ -1845,7 +1931,10 @@
 ;; Transform if* --> ifnot* goto-w,
 ;;           goto --> goto-w
 ;; if necessary
-(defn refine-split [{:keys [op args] :as ins} pc labels]
+(defn refine-split
+  "Widen a jump instruction if necessary.
+  Called on second pass of the assembler."
+  [{:keys [op args] :as ins} pc labels]
   (case op
     (:if-acmpeq :if-acmpne :if-icmpeq :if-icmpne :if-icmplt
      :if-icmpge :if-icmpgt :if-icmple :ifeq :ifne :iflt :ifge
@@ -1876,7 +1965,8 @@
     [ins]))
 
 (defn refine1
-  "Calculate exact offset and size for one label or instruction"
+  "Calculate exact offset and size for one label or instruction.
+  Called on second pass of the assembler."
   [ins]
   (if (label? ins)
     ;; Remove the label from instruction stream
@@ -1910,7 +2000,7 @@
                 _   (set-val :code-length siz)]
                nil)))))
 
-;;;; Control flow analysis
+;;;; Third pass: control & data flow analysis
 ;; Calculate stack size and StackMapTable
 
 (def *java-hierarchy*
@@ -1984,6 +2074,8 @@
                        [(map unify1 loc ploc) (map unify1 stak pstak)])]
         [nil (assoc-in [code :frames pc] curr)]))))
 
+;; Basic blocks graph
+
 (defn target-offset [target pc labels]
   (if (integer? target)
     (+ pc target)
@@ -2036,7 +2128,9 @@
       :else
       #{nxt})))
 
-(defn basic-blocks [code labels]
+(defn basic-blocks
+  "Returns the sorted set of offsets at the start of the basic blocks"
+  [code labels]
   (loop [blocks (sorted-map) ins (seq code) start? true]
     (if-not ins
       blocks
@@ -2081,7 +2175,10 @@
   (into (sorted-map)
         (map vector (keys m) (map f (keys m)))))
 
-(defn block-graph [blocks code]
+(defn block-graph
+  "Given the set of start offsets, calculates the
+  directed control flow graph of basic blocks"
+  [blocks code]
   (let [all-neighbors
         (map-keys (partial block-neighbors
                            (:disasm code)
@@ -2112,7 +2209,6 @@
                       (graph/lazy-walk block-graph (keys init) #{})))
         [siz exit] (calc init)]
     (reduce max siz)))
-        
 
 ;;;; Top-level interface
 
@@ -2153,6 +2249,6 @@
 
 ;;;; Debug: inspect classes being generated in assembling
 
-(defn inspect [cref]
+#_(defn inspect [cref]
   (clojure.inspector/inspect-tree
     (assemble-class cref)))

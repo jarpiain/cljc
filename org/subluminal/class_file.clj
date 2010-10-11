@@ -433,7 +433,12 @@
 
 (defmethod attribute-length "Code"
   [at inf]
-  (+ 12 (:code-length inf)))
+  (+ 12
+     (:code-length inf)
+     (* 8 (count (:exception-table inf)))
+     (* 6 (count (:attributes inf))) ; headers
+     (reduce + (map #(attribute-length (:name %) %)
+                    (:attributes inf)))))
 
 (defmethod attribute-length "Exceptions"
   [at inf]
@@ -442,6 +447,14 @@
 (defmethod attribute-length "SourceFile"
   [at inf]
   2)
+
+(defmethod attribute-length "Deprecated"
+  [at inf]
+  0)
+
+(defmethod attribute-length "Synthetic"
+  [at inf]
+  0)
 
 (bin/defbinary [attribute-info pool]
   [:name-index ::bin/uint16 {:constraint #(< 0 % (count pool))}]
@@ -695,7 +708,7 @@
   [:start-pc ::bin/uint16]
   [:end-pc ::bin/uint16]
   [:handler-pc ::bin/uint16]
-  [:catch-type ::bin/uint16 {:constraint #(< % (count pool)) :aux 0}]
+  [:catch-type ::bin/uint16 {:constraint #(< % (count pool))}]
   [:catch ::null {:transient (if (zero? catch-type)
                                '* ; finally
                                (to-symbol (class-name pool catch-type)))}])
@@ -1947,6 +1960,21 @@
                               'block nil nil []
                               body)))
 
+     (= (first item) 'catch)
+     (let [[_ beg end handler spec] item]
+       (dosync
+         (let [[idx tab]
+               (if-not spec
+                 [0 nil]
+                 ((class-to-pool
+                    (normalize-type-specifier spec))
+                  (:symtab @cref)))]
+           (when spec (alter cref assoc :symtab tab))
+           (alter mref update-in [:attributes 0 :exception-table]
+                  conj {:start-pc beg :end-pc end
+                        :handler-pc handler
+                        :catch-type idx}))))
+
      (block? item)
      (let [[_ beg end vars & items] item]
        (dosync
@@ -2352,15 +2380,28 @@
 
 ;;;; Top-level interface
 
+(defn get-or-die [map val]
+  (or (get map val) (throw (RuntimeException. (str "Undefined label " val)))))
+
 ;; refine, compute block graph, generate stack map
 (defn assemble-method [mref]
   (dosync
     (when-not (some #{:abstract :native} (:flags @mref))
       (refine mref)
       (let [code (get-in @mref [:attributes 0])
+            labels (into {} (for [[k [v v]] (:labels code)] [k v]))
             blocks (basic-blocks (:asm code) (:labels code))
             graph (block-graph blocks code)
             stack (method-stack-size graph (:asm code))]
+        (alter mref update-in [:attributes 0 :exception-table]
+               (fn [xs]
+                 (vec (map (fn [{:keys [start-pc end-pc
+                                        handler-pc catch-type]}]
+                             {:start-pc (get-or-die labels start-pc)
+                              :end-pc (get-or-die labels end-pc)
+                              :handler-pc (get-or-die labels handler-pc)
+                              :catch-type catch-type})
+                           xs))))
         (alter mref assoc-in [:attributes 0 :max-stack] stack)))))
 
 (defn assemble-class [cref]

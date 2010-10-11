@@ -2,13 +2,15 @@
   (:require (org.subluminal [binfmt :as bin])
             (clojure string set)
             (clojure.contrib [graph :as graph]))
-  (:use (clojure.contrib monads))
+  (:use (clojure.contrib monads)
+        (org.subluminal util))
   (:import (java.io ByteArrayInputStream DataInputStream InputStream
                     ByteArrayOutputStream DataOutputStream)
            (java.lang.reflect Field Method Constructor)
            (java.nio ByteBuffer)))
 
-(declare disasm doasm to-symbol class-name pool-string)
+(declare to-symbol class-name pool-string disasm doasm
+         sizeof-desc)
 
 ;;;; Parser for descriptor and signature strings
 
@@ -260,7 +262,12 @@
   [:symtab ::null {:transient {:pool []}}] ; (split-pool constant-pool)
   [:flags ::bin/uint16
      {:bitmask {:public 0 :final 4 :super 5 :interface 9 :abstract 10
-                :synthetic 12 :annotation 13 :enum 14}}]
+                :synthetic 12 :annotation 13 :enum 14}
+      :constraint (sat? (and (--> :annotation :interface)
+                             (--> :interface
+                                  (and :abstract
+                                       (nor :final :super :enum)))
+                             (nand :final :abstract)))}]
   [:this-class ::bin/uint16 {:constraint #(< 0 % constant-pool-count)}]
   [:name ::null
     {:transient (to-symbol (class-name constant-pool this-class))}]
@@ -413,10 +420,23 @@
 
 ;;;; Attributes
 
+;; Used to calculate the length field when writing
+(defmulti attribute-length (fn [at inf] at))
+(defmethod attribute-length :default [at inf] 0)
+
+(defmethod attribute-length "ConstantValue"
+  [at inf]
+  2)
+
+(defmethod attribute-length "Code"
+  [at inf]
+  (+ 12 (:code-length inf)))
+
 (bin/defbinary [attribute-info pool]
   [:name-index ::bin/uint16 {:constraint #(< 0 % (count pool))}]
   [:name ::null {:transient (pool-string pool name-index)}]
-  [:length ::bin/uint32 {:aux 0}]
+  [:length ::bin/uint32 {:aux (attribute-length name attribute-info)}]
+  [:len2 ::null {:transient length}]
   (cond
     (= name "SourceFile")
     (do [:file-index ::bin/uint16 {:constraint #(< 0 % (count pool))}]
@@ -1055,7 +1075,7 @@
 (defn normalized-clazz? [cls]
   (or (symbol? cls)  ; class or iface
       (keyword? cls) ; primitive
-      (and (seq? cls)
+      (and (sequential? cls)
            (= (first cls) :array)
            (normalized-clazz? (second cls)))))
 
@@ -1077,7 +1097,7 @@
         :else
         (symbol (.getName cls))))
 
-    (and (seq? desc) (= (first desc) :array))
+    (and (sequential? desc) (= (first desc) :array))
     [:array (normalize-type-specifier (second desc))]
 
     :else
@@ -1397,18 +1417,26 @@
           (:symtab cls))]
     (assoc res :symtab syms)))
 
-(defn add-field [cref {:keys [name descriptor flags] :as fld}]
+(declare add-attribute)
+
+(defn add-field [cref {:keys [name descriptor flags constant] :as fld}]
   (dosync
     (let [[[namei desci] tab]
           ((domonad state-m
              [n (utf-to-pool (str name))
-              d (utf-to-pool (type-descriptor-string descriptor))]
+              d (utf-to-pool (type-descriptor-string
+                               (normalize-type-specifier descriptor)))]
              [n d])
            (:symtab @cref))
           fref (ref (assoc fld :name-index namei
                                :descriptor-index desci))]
       (alter cref #(-> % (update-in [:fields] conj fref)
                          (assoc :symtab tab)))
+      (if constant
+        (let [[ci tab] ((const-to-pool constant) (:symtab @cref))]
+          (alter cref assoc :symtab tab)
+          (add-attribute cref fref {:name "ConstantValue"
+                                    :value-index ci})))
       fref)))
 
 (defn add-attribute [cref xref {:keys [name] :as attr}]
@@ -1879,6 +1907,12 @@
                      _ (update-val :asm #(conj % item))]
                     nil)))))
 
+     (= (first item) 'do)
+     (let [body (rest item)]
+       (emit cref mref (apply vector
+                              'block nil nil []
+                              body)))
+
      (block? item)
      (let [[_ beg end vars & items] item]
        (dosync
@@ -2318,6 +2352,28 @@
 ;; calling add-field, add-method, emit, assemble-method, assemble-class
 (defn assemble [cs]
   cs)
+
+(defn sendout
+  ([cls] (sendout cls *compile-path*))
+  ([cls path]
+   (let [buf (ByteBuffer/allocate 100000)
+         qname (str (:name cls))
+         sep (System/getProperty "file.separator")
+         fpath (apply str (interpose sep (.split qname "\\.")))
+         cls-file (java.io.File. path (str fpath ".class"))]
+     (.mkdirs (java.io.File. (.getParent cls-file)))
+     (println "Writing to" (.getCanonicalPath cls-file))
+     (with-open [fos (java.io.FileOutputStream. cls-file)
+                 chan (.getChannel fos)]
+       (bin/write-binary ::ClassFile buf cls)
+       (.flip buf)
+       (.write chan buf)))))
+
+(defn readout [cls]
+  (let [buf (ByteBuffer/allocate 10000)]
+    (bin/write-binary ::ClassFile buf cls)
+    (.flip buf)
+    (bin/read-binary ::ClassFile buf)))
 
 ;;;; Debug: inspect classes being generated in assembling
 

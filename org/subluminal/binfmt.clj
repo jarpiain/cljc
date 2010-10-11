@@ -340,7 +340,7 @@
         `(symbol-macrolet ~(apply vector buf gbuf obj fmt-name
                                   (interleave more args))
            ~wr-body))
-      `(do (println ":::" '~fmt-name) (~wr ~gbuf ~fmt-name ~@args)))))
+      `(~wr ~gbuf ~fmt-name ~@args))))
 
 (defn- make-field-reader [fmt-name gtag gbuf fld remain typs]
   (let [[tag typ opt] fld

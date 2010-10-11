@@ -1418,15 +1418,30 @@
       (alter cref assoc :symtab tab)
       attr)))
 
+(defn merge-locals [{:keys [vars size] :as ctx} bindings]
+  (println "Merge" ctx "with" bindings)
+  (let [[vars size]
+        (reduce (fn [[vs siz] [sym typ]]
+                  (let [delta (sizeof-desc (normalize-type-specifier typ))]
+                    [(assoc vs sym siz) (+ siz delta)]))
+                [vars size]
+                (partition 2 bindings))]
+    (println "Got" vars "@" size)
+    (assoc ctx :size size :vars vars)))
+
 ;; XXX assembler assumes the Code attribute is at index 0
-(defn add-method [cref {:keys [name descriptor flags] :as meth}]
+(defn add-method [cref {:keys [name descriptor flags params] :as meth}]
   (dosync
-    (let [[[namei desci] tab]
+    (let [[_ _ args :as desc] (normalize-method-descriptor descriptor)
+          bindings (interleave (concat params (repeatedly gensym)) args)
+          init-ctx (merge-locals {:vars {} :size 0}
+                                 (if (flags :static)
+                                   bindings
+                                   (list* 'this (:name @cref) bindings)))
+          [[namei desci] tab]
           ((domonad state-m
              [n (utf-to-pool (str name))
-              d (utf-to-pool (method-descriptor-string
-                               (normalize-method-descriptor
-                                 descriptor)))]
+              d (utf-to-pool (method-descriptor-string desc))]
              [n d])
            (:symtab @cref))
           mref (ref (assoc meth :name-index namei
@@ -1439,9 +1454,10 @@
                                   :labels {}
                                   :pc [0 0]
                                   :max-stack 0
-                                  :max-locals 0
+                                  :max-locals (:size init-ctx)
                                   :code-length 0
                                   :disasm []
+                                  :ctx init-ctx
                                   :exception-table []
                                   :attributes []}))
       mref)))
@@ -1618,6 +1634,9 @@
     (= desc :double) 2
     (= desc :void) 0
     :else 1))
+
+(defn method-weight [[_ _ args]]
+  (reduce + (map sizeof-desc args)))
 
 (letfn [(--> [y xs] (zipmap xs (repeat y)))]
   (def +stack-delta+
@@ -1836,15 +1855,18 @@
         (alter mref assoc-in [:attributes 0] ncode)
         (alter cref assoc :symtab ntab)))))
 
+; (label foo)
 (defn label? [ins]
   (= (first ins) 'label))
 
+; (block start end [var type...]
+;   body)
 (defn block? [ins]
   (= (first ins) 'block))
 
 (defn emit
   "Add an instruction, block, or label into the instruction stream"
-  ([cref mref item] (emit cref mref {} item))
+  ([cref mref item] (emit cref mref (get-in @mref [:attributes 0 :ctx]) item))
   ([cref mref ctx item]
    (cond
      (label? item)
@@ -1858,16 +1880,19 @@
                     nil)))))
 
      (block? item)
-     (let [[_ lbl vars & items] item]
+     (let [[_ beg end vars & items] item]
        (dosync
-         (when lbl (emit cref mref ['label lbl]))
-         (let [subctx (apply assoc ctx vars)]
+         (when beg (emit cref mref ['label beg]))
+         (let [subctx (merge-locals ctx vars)]
+           (alter mref update-in [:attributes 0 :max-locals]
+                  (partial max (:size subctx)))
            (doseq [i items]
-             (emit cref mref subctx i)))))
+             (emit cref mref subctx i)))
+         (when end (emit cref mref ['label end]))))
 
      :else
      (let [[op & args] item]
-       (emit1 cref mref (struct instruction op args nil) ctx)))))
+       (emit1 cref mref (struct instruction op args nil) (:vars ctx))))))
 
 ;;;; Second pass of the assembler
 ;; Calculate exact offset of each instruction and label;

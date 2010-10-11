@@ -166,7 +166,7 @@
 
 ;;; Primitive arrays
 
-(defprimitive ^{:inline true} byte-array [buf ^"[B" obj ^Number len]
+(defprimitive byte-array [buf ^"[B" obj ^Number len]
   (let [a (byte-array len)]
     (.get buf a) a)
   (.put buf obj))
@@ -340,7 +340,7 @@
         `(symbol-macrolet ~(apply vector buf gbuf obj fmt-name
                                   (interleave more args))
            ~wr-body))
-      `(~wr ~gbuf ~@args))))
+      `(do (println ":::" '~fmt-name) (~wr ~gbuf ~fmt-name ~@args)))))
 
 (defn- make-field-reader [fmt-name gtag gbuf fld remain typs]
   (let [[tag typ opt] fld
@@ -483,7 +483,9 @@
 (defn- make-writer-1 [fmt-name tag# gbuf fld remain typs]
   (cond
     (or (keyword? (first fld)) (= (first fld) 'internal))
-    (let [[tag typ opt] fld
+    (let [[tag typ opt] fld]
+      (if (:transient opt) remain
+        (let [
           opt (if (nil? opt) {} opt)
 
           source-form (if (= tag 'internal)
@@ -515,7 +517,7 @@
                          (let [~source-form ~(:until opt)]
                            ~output-form))
                       :default output-form)]
-      `(do ~iter-form ~remain))
+      `(do ~iter-form ~remain))))
 
 
     (= (first fld) 'skip)
@@ -549,10 +551,10 @@
     `(do (cond
            ~@(mapcat (fn [[tst fld]]
                        (list tst
-                         `(let ~(vec (apply concat
-                                                 (collect-field fld fmt-name)))
-                           ~(make-writer-1 fmt-name tag# gbuf
-                                           fld fmt-name typs))))
+                         `(let ~(vec (apply concat (collect-field fld fmt-name)))
+                            (let ~(vec (apply concat (collect-aux-field fld fmt-name)))
+                              ~(make-writer-1 fmt-name tag# gbuf
+                                              fld fmt-name typs)))))
                      (partition 2 (next fld))))
        ~remain)
 
@@ -562,15 +564,15 @@
              ~@(mapcat (fn [[tst fld]]
                          (if fld
                            (list tst
-                             `(let ~(vec (apply concat
-                                                (collect-field fld fmt-name)))
-                                ~(make-writer-1 fmt-name tag# gbuf
-                                                fld fmt-name typs)))
+                             `(let ~(vec (apply concat (collect-field fld fmt-name)))
+                                (let ~(vec (apply concat (collect-aux-field fld fmt-name)))
+                                  ~(make-writer-1 fmt-name tag# gbuf
+                                                  fld fmt-name typs))))
                            (list
-                             `(let ~(vec (apply concat
-                                               (collect-field tst fmt-name)))
-                                ~(make-writer-1 fmt-name tag# gbuf
-                                                tst fmt-name typs)))))
+                             `(let ~(vec (apply concat (collect-field tst fmt-name)))
+                                (let ~(vec (apply concat (collect-aux tst fmt-name)))
+                                  ~(make-writer-1 fmt-name tag# gbuf
+                                                  tst fmt-name typs))))))
                        (partition 2 2 [] body)))
          ~remain))
 

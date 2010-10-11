@@ -8,7 +8,7 @@
            (java.lang.reflect Field Method Constructor)
            (java.nio ByteBuffer)))
 
-(declare disasm to-symbol class-name pool-string)
+(declare disasm doasm to-symbol class-name pool-string)
 
 ;;;; Parser for descriptor and signature strings
 
@@ -344,7 +344,7 @@
 
   (doseq [inf obj]
     (when inf
-      (bin/write-binary ::cp-info1 inf))))
+      (bin/write-binary ::cp-info1 buf inf))))
 
 (bin/defprimitive utf8 [buf ^String obj]
   (let [size (bin/read-binary ::bin/uint16 buf)]
@@ -429,9 +429,10 @@
     (= name "Code")
     (do [:max-stack ::bin/uint16]
         [:max-locals ::bin/uint16]
-        [:code-length ::bin/uint32 {:aux (alength code)}]
-        [:code [::bin/byte-array code-length]]
-        [:disasm ::null
+        [:code-length ::bin/uint32]
+        [:code [::bin/byte-array code-length]
+           {:aux (doasm asm (:labels attribute-info) code-length)}]
+        [:asm ::null
            {:transient (try (disasm code pool)
                          (catch Exception e (.printStackTrace e)))}]
         [:extab-length ::bin/uint16 {:aux (count exception-table)}]
@@ -1419,14 +1420,12 @@
       attr)))
 
 (defn merge-locals [{:keys [vars size] :as ctx} bindings]
-  (println "Merge" ctx "with" bindings)
   (let [[vars size]
         (reduce (fn [[vs siz] [sym typ]]
                   (let [delta (sizeof-desc (normalize-type-specifier typ))]
                     [(assoc vs sym siz) (+ siz delta)]))
                 [vars size]
                 (partition 2 bindings))]
-    (println "Got" vars "@" size)
     (assoc ctx :size size :vars vars)))
 
 ;; XXX assembler assumes the Code attribute is at index 0
@@ -1456,7 +1455,7 @@
                                   :max-stack 0
                                   :max-locals (:size init-ctx)
                                   :code-length 0
-                                  :disasm []
+                                  :asm []
                                   :ctx init-ctx
                                   :exception-table []
                                   :attributes []}))
@@ -1849,7 +1848,7 @@
                               [nextpc (advance
                                         (ins-size currpc instr
                                                   (:labels code)))
-                               _ (update-val :disasm
+                               _ (update-val :asm
                                    #(conj % ninstr))]
                               nextpc) code)]
         (alter mref assoc-in [:attributes 0] ncode)
@@ -1869,6 +1868,7 @@
   ([cref mref item] (emit cref mref (get-in @mref [:attributes 0 :ctx]) item))
   ([cref mref ctx item]
    (cond
+     ;; Todo: LineNumberTable items
      (label? item)
      (let [[_ lbl] item]
         (dosync
@@ -1876,12 +1876,13 @@
                 (comp second
                   (domonad state-m
                     [_ (add-label lbl)
-                     _ (update-val :disasm #(conj % item))]
+                     _ (update-val :asm #(conj % item))]
                     nil)))))
 
      (block? item)
      (let [[_ beg end vars & items] item]
        (dosync
+         ;; Todo: generate LocalVarTable entries
          (when beg (emit cref mref ['label beg]))
          (let [subctx (merge-locals ctx vars)]
            (alter mref update-in [:attributes 0 :max-locals]
@@ -2000,7 +2001,7 @@
         [nil (assoc-in code [:labels lbl] [pc pc])]))
     (fn [{:keys [labels pc] :as code}]
       (let [split (refine-split ins pc labels)]
-        (loop [target (:disasm code) pc pc remain split]
+        (loop [target (:asm code) pc pc remain split]
           (if (seq remain)
             (let [ins (first remain)
                   siz (exact-size ins pc)]
@@ -2008,7 +2009,7 @@
                      (+ pc siz)
                      (next remain)))
             [nil (-> code (assoc-in [:pc] pc)
-                          (assoc-in [:disasm] target))]))))))
+                          (assoc-in [:asm] target))]))))))
 
 (defn refine
   "Calculate exact offsets for all instructions and labels in a method"
@@ -2019,7 +2020,7 @@
            (comp second
              (domonad state-m
                [_   (set-val :pc 0)
-                ins (set-val :disasm (sorted-map))
+                ins (set-val :asm (sorted-map))
                 _   (m-map refine1 ins)
                 siz (fetch-val :pc)
                 _   (set-val :code-length siz)]
@@ -2206,7 +2207,7 @@
   [blocks code]
   (let [all-neighbors
         (map-keys (partial block-neighbors
-                           (:disasm code)
+                           (:asm code)
                            blocks
                            (:labels code))
                   blocks)]
@@ -2235,6 +2236,52 @@
         [siz exit] (calc init)]
     (reduce max siz)))
 
+(defn asm1 
+  "Assemble one bytecode instruction"
+  [^ByteBuffer buf {:keys [op args]} labels]
+  (let [pc (.position buf)
+        [b & atyps] (+opcodes+ op)]
+    (bin/write-binary ::bin/uint8 buf b)
+    (doseq [[t a] (map vector atyps (concat args (repeat 0)))]
+      (if (symbol? a)
+        (bin/write-binary t buf (- (first (get labels a)) pc))
+        (bin/write-binary t buf a)))
+    (case op
+      :tableswitch
+      (let [[_ default low high & more] args]
+        (doseq [targ more]
+          (if (symbol? targ)
+            (bin/write-binary ::bin/int32 buf (- (first (get labels targ)) pc))
+            (bin/write-binary ::bin/int32 buf targ))))
+
+      :lookupswitch
+      (let [[_ default npairs & more] args]
+        (doseq [[key targ] (partition 2 more)]
+          (bin/write-binary ::bin/int32 buf key)
+          (if (symbol? targ)
+            (bin/write-binary ::bin/int32 buf (- (first (get labels targ)) pc))
+            (bin/write-binary ::bin/int32 buf targ))))
+
+;      :wide
+;      (let [[wop & watyps]
+;            (+lookup-wide+ (bin/read-binary ::bin/uint8 buf))
+;            wargs (doall (map #(lookup-pool %
+;                                 (bin/read-binary % buf))
+;                              watyps))]
+;        (apply vector pc op wop wargs))
+
+      ; default
+      nil)))
+
+(defn doasm
+  "Assemble the bytecode array of a method"
+  [ins labels len]
+  (let [bytecode (byte-array len)]
+    (let [^ByteBuffer buf (ByteBuffer/wrap bytecode)]
+      (doseq [[offs instr] ins]
+        (asm1 buf instr labels)))
+    bytecode))
+
 ;;;; Top-level interface
 
 ;; refine, compute block graph, generate stack map
@@ -2243,9 +2290,9 @@
     (when-not (some #{:abstract :native} (:flags @mref))
       (refine mref)
       (let [code (get-in @mref [:attributes 0])
-            blocks (basic-blocks (:disasm code) (:labels code))
+            blocks (basic-blocks (:asm code) (:labels code))
             graph (block-graph blocks code)
-            stack (method-stack-size graph (:disasm code))]
+            stack (method-stack-size graph (:asm code))]
         (alter mref assoc-in [:attributes 0 :max-stack] stack)))))
 
 (defn assemble-class [cref]

@@ -64,7 +64,7 @@
      args (match-* <field-descriptor>)
      rp (match-char \))
      ret <field-descriptor>]
-    (list 'method ret args)))
+    [:method ret args]))
 
 ;; Parse signatures
 

@@ -1,4 +1,5 @@
 (ns org.subluminal.util
+  (:use (clojure.contrib monads))
   (:refer-clojure))
 
 (defn- sat-body [coll form]
@@ -40,3 +41,59 @@
   (let [s (gensym)
         body (sat-body s form)]
     `(fn [~s] (if ~body true false))))
+
+(def parser-m (state-t maybe-m))
+
+(defn match-char
+  "Parser that matches a specified char"
+  [ch]
+  (fn [^String input]
+    (if (= (first input) ch)
+      [ch (.substring input 1)]
+      nil)))
+
+(defn match-until
+  "Parser that matches until next occurrence of a terminator char.
+   Consumes the terminator."
+  [ch]
+  (fn [^String input]
+    (let [idx (.indexOf input (int ch))]
+      (if (== idx -1)
+        nil
+        [(.substring input 0 idx) (.substring input (inc idx))]))))
+
+(defn peek-until
+  "Parser that matches until next occurrence of one of a set of chars.
+   Does not consume the terminator."
+  [chs]
+  (fn [^String input]
+    (let [res (apply str (take-while (complement chs)
+                                     input))]
+      [res (.substring input (count res))])))
+
+(defn match-case
+  "Parser that matches the keys in a map returning the corresponding value"
+  [map]
+  (fn [^String input]
+    (let [ch (first input)]
+      (if (contains? map ch)
+        [(map ch) (.substring input 1)]
+        nil))))
+
+(defn optional [parser]
+  (with-monad parser-m
+    (m-plus parser (m-result nil))))
+
+(defn match-+
+  "Match a sequence of one or more instances of p"
+  [p]
+  (domonad parser-m
+    [head p
+     tail (optional (match-+ p))]
+    (cons head tail)))
+
+(defn match-*
+  "Match a sequence of zero or more instances of p"
+  [p]
+  (with-monad parser-m
+    (m-plus (match-+ p) (m-result ()))))

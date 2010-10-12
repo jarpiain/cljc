@@ -1896,7 +1896,8 @@
   ([cref mref item] (emit cref mref (get-in @mref [:attributes 0 :ctx]) item))
   ([cref mref ctx item]
    (cond
-     ;; Todo: LineNumberTable items
+     ;; Todo: LineNumberTable items [:line 128]
+     ;;       block directive adds to LocalVarTable
      (label? item)
      (let [[_ lbl] item]
         (dosync

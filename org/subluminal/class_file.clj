@@ -43,11 +43,20 @@
   (domonad parser-m
     [ch (match-char \[)
      f #'<field-descriptor>]
-    (list 'array f)))
+    [:array f]))
 
 (def <field-descriptor>
   (with-monad parser-m
     (m-plus <primitive> <array> <class>)))
+
+(def <class-constant>
+  (with-monad parser-m
+    (m-plus
+      (domonad parser-m
+        [_ (peek-char #{\[})
+         d <field-descriptor>]
+        d)
+      match-tail)))
 
 (def <method-descriptor>
   (domonad parser-m

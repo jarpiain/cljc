@@ -52,6 +52,19 @@
       [ch (.substring input 1)]
       nil)))
 
+(defn peek-char
+  "Parser that fails if next char doesn't match. Doesn't consume input."
+  [chs]
+  (fn [^String input]
+    (when-let [ch (chs (first input))]
+      [ch input])))
+
+(def
+  ^{:doc "Parser that matches until end of input"}
+  match-tail
+  (fn [input]
+    [input ""]))
+
 (defn match-until
   "Parser that matches until next occurrence of a terminator char.
    Consumes the terminator."

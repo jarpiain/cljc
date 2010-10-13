@@ -53,7 +53,7 @@
 
 (deftest interval-arithmetic
   (let [before {:pc [2 5]}
-        [_ after] ((advance [10 20]) code)]
+        [_ after] ((advance [10 20]) before)]
     (is (= (:pc after) [12 25])))
   (is (bound-interval? [50 55] [100 110] [-100 100]))
   (is (bound-interval? [100 110] [50 55] [-100 100]))
@@ -68,15 +68,15 @@
                    {'default 1000 'second 1050 'third 2000 'fourth 0})
          [(+ 13 12) (+ 13 12 3)]))
   (is (= (ins-size [40000 40000] {:op :ifeq :args ['start]}
-                   {'start 20000})
+                   {'start [20000 24000]})
          [3 3]))
   (is (= (ins-size [40000 40000] {:op :ifeq :args ['start]}
-                   {'start 0})
+                   {'start [0 20000]})
          [3 8]))
   (is (= (ins-size [40000 40000] {:op :ifeq :args ['start]} {})
          [3 8]))
   (is (= (ins-size [0 10000] {:op :ifeq :args ['end]}
-                   {'end 40000})
+                   {'end [20000 40000]})
          [3 8])))
 
 (deftest instructions-misc
@@ -89,4 +89,4 @@
   (is (== (sizeof-desc [:array :int]) 1))
   (is (== (method-weight [:method :void [:int :int :long]]) 4))
   (is (== (method-weight [:method :long ['java.lang.Object [:array :long]]])
-          3))
+          2)))

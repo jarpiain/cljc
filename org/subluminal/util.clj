@@ -2,7 +2,7 @@
   (:use (clojure.contrib monads))
   (:refer-clojure))
 
-(defn- sat-body [coll form]
+(defn sat-body [coll form]
   (if-not (sequential? form)
     `(~form ~coll)
     (let [[op & args] form]

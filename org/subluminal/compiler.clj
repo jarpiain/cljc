@@ -1,50 +1,9 @@
 (ns org.subluminal.compiler
   (:import (java.io Reader)
-           (clojure.lang LineNumberingPushbackReader))
+           (clojure.lang LineNumberingPushbackReader
+                         RT Var Symbol Keyword))
+  (:use (clojure.contrib monads))
   (:require (org.subluminal [class-file :as asm])))
-
-;;;; Util
-
-(def *local-env* *method*)
-
-(defn close-over [binding method]
-  (when (and binding method
-             (not (contains? (:locals method) binding)))
-    (dosync
-      (alter method update-in [:closes] assoc binding binding))
-    (close-over binding (:parent method))))
-
-(defn reference-local [sym]
-  (if-not (bound? #'*local-env*)
-    nil
-    (let [b (get *local-env* sym)]
-      (when b
-        (close-over *method* b))
-      b)))
-
-(defn macro? [sym]
-  (cond
-    ;; local macros...
-    (and (symbol? sym) (reference-local sym))
-    nil
-
-    (or (symbol? sym) (var? sym))
-    (let [^Var v (if (var? sym)
-                   sym
-                   (lookup-var sym false))]
-      (when (and v (.isMacro v))
-        (if (or (= (.ns v) *ns*)
-                (.isPublic v))
-          v
-          (throw (IllegalStateException.
-                   (str "var: " v " is not public"))))))))
-
-(defn names-static-member [^Symbol sym]
-  (and (.getNamespace sym)
-       (not (namespace-for sym))))
-
-;; context values
-;; :statement :expression :return :eval
 
 (defn etype [x]
   (if (nil? x)
@@ -53,10 +12,189 @@
       (::etype m)
       (class x))))
 
+(defmulti analyze etype)
+(defmethod analyze :default
+  [form]
+  (fn [ctx]
+    (throw (IllegalArgumentException.
+             (str "Can't analyze " form)))))
+
+(defmethod analyze ::null
+  [form]
+  (with-monad state-m
+    (m-result nil)))
+
+(defmethod analyze ::recur
+  [[_ & inits :as form]]
+  (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
+    (cond
+      (or (not= position :return) (nil? loop-label))
+      (throw (Exception. "Can only recur from tail position"))
+
+      catching
+      (throw (Exception. "Cannot recur from catch/finally"))
+
+      (not (== (count inits) (count loop-locals)))
+      (throw (Exception.
+        (format "Mismatched argument count to recur, expected: %d args, got %d"
+                (count loop-locals)
+                (count inits))))
+
+      :valid
+      (let [[inits ctx]
+            ((m-map analyze inits) ctx)
+            analyzed-form (list* 'recur inits)]
+        [(with-meta analyzed-form
+                    (merge (meta form)
+                           {::loop-label loop-label
+                            ::loop-locals loop-locals}))
+         ctx]))))
+
+
+(defstruct context
+           :kind        ; :fn :method :loop :let :catch
+           :position    ; :eval :statement :expression :return
+           :lexicals    ; symbol -> struct lex-binding
+           :loop-locals ; vector lex-binding
+           :loop-label  ; symbol
+           :method      ; method form
+           :fn          ; struct fn-class
+           :catching    ; catch-finally
+           :parent)     ; context
+
+(defstruct fn-class
+           :symbol ; may be nil
+           :internal-name
+           :enclosing-method
+           :closed-lexicals
+           :constants
+           :context)
+
+(defstruct method ; metadata on method form
+           :params) ; 
+
+(defstruct lex-binding
+           :kind   ; :fnarg :local :closed
+           :method ; relevant for :local :fnarg
+           :closed-idx
+           :java-type
+           :fn)
+
+(defn boxing-unify [x y]
+  (cond
+    (= x y)
+    x
+
+    (or (nil? x) (nil? y))
+    nil
+
+    (isa? x y)
+    y
+
+    (isa? y x)
+    x
+
+    :else
+    Object))
+
+(defn push-fn-context [f]
+  (fn [ctx]
+    [nil (assoc ctx
+                :parent ctx
+                :fn f)]))
+
+(defn push-method-context [m]
+  (fn [ctx]
+    [nil
+     (assoc ctx
+            :parent ctx
+            :method m
+            :lexicals (merge (:lexicals ctx)
+                             (:method-params m))
+            :loop-label (:loop-label m)
+            :loop-locals (:loop-locals m))]))
+
+(defn inject-local [sym init]
+  (domonad state-m
+    [init (analyze init :expression)
+     m (fetch-val :method)
+     _ (update-val :lexicals #(assoc % sym {:kind :local
+                                            :method m}))]
+    init))
+
+;(defn push-loop-context [inits]
+;  (domonad state-m))
+
+(defn pop-frame [ctx]
+  [nil (:parent ctx)])
+
+(def null-context (struct context {} [] nil nil nil))
+
+(defn valid-binding? [b ctx]
+  (case (:kind b)
+    :closed (= (:fn b) (:fn ctx))
+    (:local :fnarg)
+    (= (:method b) (:method ctx))))
+
+(defn close-over [b]
+  (fn updater [ctx]
+    (if (valid-binding? b ctx)
+      ctx
+      (let [ctx (updater (:parent ctx))
+            bb (get-in ctx [:lexicals (:symbol b)])
+            clos (:closed-lexicals (:fn ctx))]
+        (-> ctx
+          (update-in [:lexicals (:symbol b)]
+                     assoc :kind :closed
+                           :closed-idx (count clos)
+                           :method (:method ctx))
+          (update-in [:fn :closed-lexicals] conj bb))))))
+
+(defn resolve-lexical [sym ctx]
+  (if-let [b (get (:lexicals ctx) sym)]
+    (let [ctx ((close-over b) ctx)
+          b (get (:lexicals ctx) sym)]
+      [b ctx])  
+    [nil ctx]))
+
+(defn unify-loop [types]
+  (fn updater [ctx]
+    (if (#{:loop :fn} (:kind ctx))
+      (assoc ctx :loop-locals
+             (map #(assoc %1 :java-type %2)
+                  (:loop-locals ctx)
+                  types))
+      (let [parent (updater (:parent ctx))]
+        (assoc ctx
+               :parent parent
+               :loop-locals (:loop-locals parent))))))
+
+(load "cljc/util")
+
+;; context values
+;; :statement :expression :return :eval
+
+
+(derive ::if ::maybe-primitive)
+(derive ::let ::maybe-primitive)
+(derive ::do ::maybe-primitive)
+(derive ::loop ::maybe-primitive)
+
+(derive ::null ::literal)
+(derive Boolean ::literal)
+(derive String ::literal)
+
+(derive Boolean ::primitive)
+(derive ::primitive ::maybe-primitive)
+
 ;; methods for
-;; Symbol Keyword Number String
+
+;;;; Analyze
+;; tags a form with ::etype
+;; (maybe also ::can-emit-primitive? ::java-class)
 
 (declare analyze-seq analyze-symbol analyze-fn)
+(defmulti analyze-special first)
 
 (defn analyze
   ([ctx form] (analyze ctx form nil))
@@ -90,8 +228,8 @@
        :else
        (with-meta [form] {::etype ::constant})))))
 
-(defmulti analyze-special first)
-(defmulti emit (fn [form ctx] (etype form)))
+
+(defmulti gen (fn [form ctx] (etype form)))
 (defmulti literal-val etype)
 
 (defmethod literal-val :default
@@ -102,7 +240,7 @@
   [form]
   (throw (IllegalArgumentException. (str "Unrecognized special form " form))))
 
-(defmethod emit :default
+(defmethod gen :default
   [form _ _]
   (throw (IllegalArgumentException. (str "Can't eval " form))))
 
@@ -113,12 +251,6 @@
     'set! 'try 'throw 'monitor-enter
     'monitor-exit 'catch 'finally
     'new})
-
-(derive ::if ::maybe-primitive)
-(derive ::null ::literal)
-(derive Boolean ::literal)
-(derive Boolean ::primitive)
-(derive ::primitive ::maybe-primitive)
 
 (defn analyze-seq
   [ctx form name]
@@ -144,17 +276,76 @@
             (map (partial analyze ctx) form)
             {::etype ::invoke}))))))
 
+;;;; macro expansion
+
+(def *macroexpand-limit* 100)
+(declare macroexpand1-impl)
+
+(defn macroexpand-impl [form]
+  (loop [f form n 0]
+    (let [fx (macroexpand1-impl f)]
+      (if (identical? f fx)
+        f
+        (if (and *macroexpand-limit* (>= n *macroexpand-limit*))
+          (throw (RuntimeException. (str "Runaway macroexpansion: " form)))
+          (recur fx (inc n)))))))
+
+(defn macroexpand1-impl [form]
+  (if-not (seq? form)
+    form
+    (let [op (first form)]
+      (if (contains? +specials+ op)
+        form
+        (if-let [v (the-macro op)]
+          (apply v form *local-env* (next form))
+          (if-not (symbol? op)
+            form
+            (let [sname (name op)]
+              (cond
+                (= (.charAt sname 0) \.)
+                (if-not (next form) ; (< length 2)
+                  (throw (IllegalArgumentException.
+                           (str "Malformed member expression: " form
+                                ", expecting (.member target ...)")))
+                  (let [meth (symbol (.substring sname 1))
+                        target (second form)
+                        target (if nil ; (maybe-class target false)
+                                 (with-meta
+                                   `(identity ~target)
+                                   {:tag Class})
+                                 target)]
+                    (with-meta
+                      `(~'. ~target ~meth ~@(nnext form))
+                      (meta form))))
+
+                (names-static-member? op)
+                (let [target (symbol (namespace op))
+                      meth (symbol (name op))
+                      c String] ;(maybe-class target false)]
+                  (if-not c form
+                    (with-meta
+                      `(~'. ~target ~meth ~@(next form))
+                      (meta form))))
+
+                (.endsWith sname ".")
+                (with-meta
+                  `(~'new ~(symbol (.substring sname (dec (count sname)))) ~@(next form))
+                  (meta form))
+
+                :else form))))))))
+
+;;;; bytecode generation (gen unboxed-gen)
+
 ;;;; nil literal
 
 (defmethod literal-val ::null
   [form]
   nil)
 
-(defmethod emit ::null
+(defmethod gen ::null
   [form ctx]
-  (template
-    ([:aconst-null]
-     ~@(when (= ctx :statement) [[:pop]]))))
+  `([:aconst-null]
+    ~@(when (= ctx :statement) [[:pop]])))
 
 ;;;; boolean literal
 
@@ -162,10 +353,9 @@
   [form]
   form)
 
-(defmethod emit Boolean
+(defmethod gen Boolean
   [form ctx]
-  (template
-    ~(if form
+  `(~(if form
        [:getstatic [Boolean 'TRUE Boolean]]
        [:getstatic [Boolean 'FALSE Boolean]])
     ~@(when (= ctx :statement)
@@ -177,45 +367,156 @@
   [form]
   form)
 
-(defmethod emit String
+(defmethod gen String
   [form ctx]
-  (template
-    ([:ldc ~form]
-     ~@(when (= ctx :statement)
-         [[:pop]]))))
+  `([:ldc ~form]
+    ~@(when (= ctx :statement)
+        [[:pop]])))
 
 ;;;; if
 
-(defn emit-if
+(defn gen-if
   [[test then else] ctx unboxed?]
   (let [[nulll falsel endl] (repeatedly 3 gensym)]
-    (template
-      (~@(if (= (maybe-primitive-type test) :boolean)
-           (template
-             (~@(emit-unboxed test :expression)
-              [:ifeq ~falsel]))
-           (template
-             (~@(emit test :expression)
-              [:dup]
-              [:ifnull ~nulll]
-              [:getstatic [Boolean 'FALSE Boolean]]
-              [:if-acmpeq ~falsel])))
-       ~@(if unboxed?
-           (emit-unboxed then ctx)
-           (emit then ctx))
-       [:goto ~endl]
-       [label ~nulll]
-       [:pop]
-       [label ~falsel]
-       ~@(if unboxed?
-           (emit-unboxed else ctx)
-           (emit else ctx))
-       [label ~endl]))))
+    `(~@(if (= (maybe-primitive-type test) :boolean)
+          `(~@(gen-unboxed test :expression)
+            [:ifeq ~falsel])
+          `(~@(gen test :expression)
+            [:dup]
+            [:ifnull ~nulll]
+            [:getstatic [Boolean 'FALSE Boolean]]
+            [:if-acmpeq ~falsel]))
+      ~@(if unboxed?
+          (gen-unboxed then ctx)
+          (gen then ctx))
+      [:goto ~endl]
+      [:label ~nulll]
+      [:pop]
+      [:label ~falsel]
+      ~@(if unboxed?
+          (gen-unboxed else ctx)
+          (gen else ctx))
+      [:label ~endl])))
 
-(defmethod emit ::if
+(defmethod gen ::if
   [form ctx]
-  (emit-if form ctx false))
+  (gen-if form ctx false))
 
-(defmethod emit-unboxed ::if
+(defmethod gen-unboxed ::if
   [form ctx]
-  (emit-if form ctx true))
+  (gen-if form ctx true))
+
+;;;; do
+
+(defn gen-body
+  [forms ctx unboxed?]
+  (lazy-seq
+    (when (seq forms)
+      (if (next forms)
+        (concat (gen (first forms) :statement)
+                (gen-body (next forms) ctx))
+        (if unboxed?
+          (gen-unboxed (first forms) ctx)
+          (gen (first forms) ctx))))))
+
+(defn gen ::do
+  [[_ & body] ctx]
+  (gen-body body ctx false))
+
+(defn gen-unboxed ::do
+  [[_ & body] ctx]
+  (gen-body body ctx true))
+
+;;;; toplevel
+
+;; A constant is
+;; ^{::etype ::constant} {:type foo :val v}
+
+(defn compile
+  [rd src-path src-name]
+  (binding [*source-path* src-path
+            *source-file* src-name
+            *method* nil
+            *local-env* {} ; symbol -> LocalBinding
+            *loop-locals* nil
+            *ns* *ns*
+            *constants* []
+            *constant-ids* {} ;; IdentityHashMap.
+            *keywords* {}
+            *vars* {}]
+    (assembling [ns-init {:name (file->class-name src-path)
+                          :flags #{:public :super}
+                          :source src-name}]
+      (let [loader (add-method ns-init {:name 'load
+                                        :descriptor [:method :void []]})
+            eof (Object.)]
+        (loop []
+          (let [form (read rd nil eof)]
+            (when-not (identical? form eof)
+              (emit ns-init loader (compile1 form))
+              (recur))))
+        (assemble-method m))
+
+      (doseq [i (range (count (:constants @init-ns)))]
+        (add-field ns-init {:name (constant-name i)
+                            :flags #{:public :static :final}}))
+
+      ;; TODO inits in blocks of 100...
+
+      (let [init-const (add-method ns-init {:name '__init0
+                                            :descriptor [:method :void []]
+                                            :flags #{:public :static}})]
+        (binding [*print-dup* true]
+          (doseq [c (:constants @ns-init)]
+              (emit init-ns init-const
+                `(~@(gen-constant c)
+                  [:checkcast ~(:type c)]
+                  [:putstatic (:name @ns-init) (constant-name i) (:type c)]))))
+        (emit1 init-ns init-const [:return])
+        (assemble-method init-const))
+
+      (let [clinit (add-method ns-init {:name '<clinit>
+                                        :descriptor [:method :void []]
+                                        :flags #{:public :static}})
+            [start-try end-try end final] (take 4 (repeatedly gensym))]
+        (emit init-ns clinit
+          `([:iconst-2] ; inlined Compiler/pushNS()
+            [:anewarray [:array ~Object]]
+            [:dup]
+            [:iconst-0] ; arr arr 0
+            [:ldc "clojure.core"]
+            [:invokestatic [~Symbol "create" [:method ~Symbol [~String]]]]
+            [:ldc "*ns*"]
+            [:invokestatic [~Symbol "create" [:method ~Symbol [~String]]]]
+            [:invokestatic [~Var "intern" [:method ~Var [~Symbol ~Symbol]]]]
+            [:aastore] ; arr[var,null]
+            [:invokestatic [~PersistentHashMap "create"
+                            [:method ~PersistentHashMap [[:array Object]]]]]
+            [:invokestatic [~Var ~'pushThreadBindings
+                            [:method :void [~Associative]]]]
+
+            [:label ~start-try]
+            [:invokestatic (:name @init-ns) 'load [:method :void []]]
+            [:label ~end-try]
+            [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
+            [:goto ~end]
+            [:label ~final]
+            [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
+            [:athrow]
+            [:label ~end]
+            [:return]
+            [:catch ~start-try ~end-try ~final nil]))
+        (assemble-method clinit))
+      (assemble-class ns-init)
+      (sendout @ns-init *compile-path*))))
+
+(defn compile1
+  "Compile a top-level form"
+  [form]
+  (let [form (macroexpand-impl form)]
+    (if (and (seq? form) (= (first form) 'do))
+      (doall (apply concat (map compile1 (next form))))
+      (let [tagged (analyze form :eval)
+            bytecode (gen tagged :expression)]
+        (eval-impl tagged)
+        bytecode))))

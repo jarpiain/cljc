@@ -39,11 +39,11 @@
            :symbol ; 'x
            :label  ; (gensym)
            :kind   ; :fnarg :local :closed
-           :method ; relevant for :local :fnarg
+           :method-tag ; gensym, relevant for :local :fnarg
            :closed-idx
            :java-type
-           :fn
-           :clear-root
+           :fn-tag
+           :clear-root ; gensym
            ;; for binding instances
            :live
            :clear-path)
@@ -54,9 +54,10 @@
    (fn [ctx]
      (println "binding a" kind "in m-tag" (:method-tag (:method ctx)))
      (let [b {:symbol sym
-              :label (gensym)
+              :label (gensym "BB")
               :kind kind
-              :method (:method ctx)
+              :method-tag (:method-tag (:method ctx))
+              :fn-tag (:fn-tag (:fn ctx))
               :java-type jtype
               :clear-root (:clear-root ctx)}]
        [b (update-in ctx [:lexicals]
@@ -139,7 +140,7 @@
      (assoc ctx
             :position :return
             :parent ctx
-            :method (assoc m :method-tag (gensym))
+            :method (assoc m :method-tag (gensym "MT"))
 ;            :lexicals (merge (:lexicals ctx)
 ;                             (:params m))
             :loop-label (:loop-label m))]))
@@ -147,7 +148,7 @@
 
 (defn push-clear-node [kind root?]
   (fn [ctx]
-    (let [tag (gensym)]
+    (let [tag (gensym "NN")]
       [nil
        (assoc ctx
               :parent ctx
@@ -168,7 +169,7 @@
               :binding-sites (:binding-sites ctx))])
 
 (def null-context
-  (let [t (gensym)]
+  (let [t (gensym "NULL")]
     {:kind nil
      :position :eval
      :lexicals {}
@@ -185,12 +186,12 @@
 
 (defn valid-binding? [b ctx]
   (println "Checking" (:kind b) "tagged"
-           (:method-tag (:method b))
+           (:method-tag  b)
            "from" (:method-tag (:method ctx)))
   (case (:kind b)
-    :closed (= (:fn b) (:fn ctx))
+    :closed (= (:fn-tag b) (:fn-tag (:fn ctx)))
     (:local :fnarg)
-    (= (:method-tag (:method b))
+    (= (:method-tag b)
        (:method-tag (:method ctx)))))
 
 (defn close-over [b]
@@ -204,8 +205,8 @@
         (-> ctx
           (update-in [:lexicals (:symbol b)]
                      assoc :kind :closed
-                           :closed-idx (count clos)
-                           :method (:method ctx))
+                           :closed-idx (count clos))
+;                           :method-tag (:method ctx)
           (update-in [:fn :closed-lexicals] conj bb))))))
 
 (defn resolve-lexical [sym ctx]
@@ -215,7 +216,7 @@
       [b ctx])  
     [nil ctx]))
 
-(defn unify-loop [types]
+#_(defn unify-loop [types]
   (fn updater [ctx]
     (if (#{:loop :fn} (:kind ctx))
       (assoc ctx :loop-locals
@@ -479,13 +480,19 @@
                         (str "fn__" (RT/nextID)))]
       (with-meta `(~'fn* ~@methods)
                  {:src form
-                  :this-name this-name
+                  :this-name this-name ; symbol used for self-recursion
                   :enclosing-method enc
                   :static? static?
                   :once-only (:once (meta op))
+                  :fn-tag (gensym "FN")
+                  ;; name of generated class
                   :name (symbol (str base-name simple-name))})))))
 
 (declare analyze-method)
+
+(def +max-positional-arity+ 20)
+(defn arity [m]
+  (count (:required-params (:argv m))))
 
 (defmethod analyze [::special 'fn*]
   [[op & opts :as form]]
@@ -494,8 +501,37 @@
      _ (push-fn-context (meta norm))
      meth (m-map analyze-method meth)
      f (fetch-val :fn)
-     _ (pop-frame)]
-    nil))
+     _ pop-frame]
+    (loop [a (vec (repeat (inc +max-positional-arity+) nil))
+           variadic nil
+           remain meth]
+      (if (seq remain)
+        (let [[info body :as m] (first remain)
+              ar (arity info)]
+          (println "Arity" ar "method")
+          (if (variadic? (:argv info))
+            (if variadic
+              (throw (Exception. "Can't have more than 1 variadic overload"))
+              (recur a m (next remain)))
+            (if (a ar)
+              (throw (Exception. "Can't have 2 overloads with same arity"))
+              (recur (assoc a ar m) variadic (next remain)))))
+        (do
+          (when-let [[info _] variadic]
+            (let [v-ar (arity info)]
+              (when (some identity (subvec a v-ar))
+                (throw (Exception.
+                         (str "Can't have fixed arity function"
+                              " with more params than variadic function"))))))
+          (when (and (:static? f)
+                     (not (empty? (:closed-lexicals f))))
+            (throw (Exception. "Static fns can't be closures")))
+          ;; compile & load
+          ;; add metadata from original form
+          (assoc f
+                 :methods (filter identity a)
+                 :variadic-method variadic))))))
+
 
 (defn process-fn*-args [argv static?]
   (loop [req-params [] rest-param nil state :req remain argv]
@@ -546,6 +582,7 @@
 
 (defn analyze-method
   [[argv & body]]
+  (println "Analyzing" argv body)
   (if (not (vector? argv))
     (throw (IllegalArgumentException.
              "Malformed method, expected argument vector"))
@@ -557,17 +594,12 @@
       (domonad state-m
         [{:keys [this-name static?] :as this-fn} (fetch-val :fn)
          argv (m-result (process-fn*-args argv static?))
-         _ (push-method-context {       #_(if static?
-                                           (zipmap argv bind)
-                                           (zipmap (cons (or this-name (gensym))
-                                                         bind)
-                                                   (cons thisb bind)))
-                                 :loop-label (gensym)
+         _ (push-method-context {:loop-label (gensym "LL")
                                  :loop-locals nil})
          _ (push-clear-node :path true)
          thisb (if static?
                  (m-result nil)
-                 (make-binding (or this-name (gensym)) IFn :fnarg))
+                 (make-binding (or this-name (gensym "THIS")) IFn :fnarg))
          bind (m-map (fn [[s t]] (make-binding s t :fnarg))
                      (if (variadic? argv)
                        (conj (:required-params argv)
@@ -579,7 +611,11 @@
          m (fetch-val :method)
          _ pop-frame
          _ pop-frame]
-        [m body]))))
+        [(assoc m
+                :argv argv
+                :bind bind
+                :this thisb)
+                body]))))
 
 (derive ::if ::maybe-primitive)
 (derive ::let ::maybe-primitive)

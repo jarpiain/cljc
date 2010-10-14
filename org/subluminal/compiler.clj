@@ -5,51 +5,6 @@
   (:use (clojure.contrib monads))
   (:require (org.subluminal [class-file :as asm])))
 
-(defn etype [x]
-  (if (nil? x)
-    ::null
-    (if-let [m (meta x)]
-      (::etype m)
-      (class x))))
-
-(defmulti analyze etype)
-(defmethod analyze :default
-  [form]
-  (fn [ctx]
-    (throw (IllegalArgumentException.
-             (str "Can't analyze " form)))))
-
-(defmethod analyze ::null
-  [form]
-  (with-monad state-m
-    (m-result nil)))
-
-(defmethod analyze ::recur
-  [[_ & inits :as form]]
-  (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
-    (cond
-      (or (not= position :return) (nil? loop-label))
-      (throw (Exception. "Can only recur from tail position"))
-
-      catching
-      (throw (Exception. "Cannot recur from catch/finally"))
-
-      (not (== (count inits) (count loop-locals)))
-      (throw (Exception.
-        (format "Mismatched argument count to recur, expected: %d args, got %d"
-                (count loop-locals)
-                (count inits))))
-
-      :valid
-      (let [[inits ctx]
-            ((m-map analyze inits) ctx)
-            analyzed-form (list* 'recur inits)]
-        [(with-meta analyzed-form
-                    (merge (meta form)
-                           {::loop-label loop-label
-                            ::loop-locals loop-locals}))
-         ctx]))))
-
 
 (defstruct context
            :kind        ; :fn :method :loop :let :catch
@@ -60,6 +15,12 @@
            :method      ; method form
            :fn          ; struct fn-class
            :catching    ; catch-finally
+
+           :clear-tag   ; gensym - identity
+           :clear-root  ; context
+           :clear-kind  ; :branch :path
+           :clear-path  ; seq of context
+           :binding-sites ; map of label -> lex-binding-inst
            :parent)     ; context
 
 (defstruct fn-class
@@ -71,14 +32,69 @@
            :context)
 
 (defstruct method ; metadata on method form
-           :params) ; 
+           :params)
 
 (defstruct lex-binding
+           :symbol ; 'x
+           :label  ; (gensym)
            :kind   ; :fnarg :local :closed
            :method ; relevant for :local :fnarg
            :closed-idx
            :java-type
-           :fn)
+           :fn
+           :clear-root
+           ;; for binding instances
+           :live
+           :clear-path)
+
+(defn make-binding [sym jtype]
+  (fn [ctx]
+    (let [b {:symbol sym
+             :label (gensym)
+             :kind :local
+             :method (:method ctx)
+             :java-type jtype
+             :clear-root (:clear-root ctx)}]
+      [b (update-in ctx [:lexicals]
+                    assoc sym b)])))
+
+(defn clear-path [b]
+  (let [p (reverse (take-while identity (iterate :clear-path b)))]
+    (println "clear-path" (:symbol b)
+             (map (juxt :clear-tag :clear-kind) p))
+    p))
+
+(defn join-point [b1 b2]
+  (loop [p1 (clear-path b1) p2 (clear-path b2)]
+    (cond
+      (not= (:clear-tag (first p1)) (:clear-tag (first p2)))
+      (do (println "early out") nil)
+
+      (or (nil? (second p1)) (not= (:clear-tag (second p1))
+                                   (:clear-tag(second p2))))
+      (first p1)
+
+      :else
+      (recur (next p1) (next p2)))))
+
+(defn make-binding-instance [b]
+  (fn [ctx]
+    (let [inst (assoc b :clear-path (:clear-path ctx)
+                        :live (atom (not= (:clear-root b)
+                                          (:clear-root ctx))))
+          lives (get-in ctx [:binding-sites (:label b)])
+          lives (reduce (fn [coll inst2]
+                          (let [j (join-point inst inst2)]
+                            (println "join for" (:symbol b)
+                                     "is" (:clear-kind j))
+                            (if (not= (:clear-kind j) :branch)
+                              (do (reset! (:live inst2) true) coll)
+                              (conj coll inst2))))
+                        []
+                        lives)]
+      [(dissoc inst :clear-path)
+       (assoc-in ctx [:binding-sites (:label b)]
+                 (conj lives inst))])))
 
 (defn boxing-unify [x y]
   (cond
@@ -114,21 +130,43 @@
             :loop-label (:loop-label m)
             :loop-locals (:loop-locals m))]))
 
-(defn inject-local [sym init]
-  (domonad state-m
-    [init (analyze init :expression)
-     m (fetch-val :method)
-     _ (update-val :lexicals #(assoc % sym {:kind :local
-                                            :method m}))]
-    init))
+(defn push-clear-node [kind root?]
+  (fn [ctx]
+    (let [tag (gensym)]
+      [nil
+       (assoc ctx
+              :parent ctx
+              :clear-tag tag
+              :clear-path ctx
+              :clear-kind kind
+              :clear-root (if root? tag (:clear-root ctx)))])))
+
+(defn push-frame []
+  (fn [ctx]
+    [nil (assoc ctx :parent ctx)]))
 
 ;(defn push-loop-context [inits]
 ;  (domonad state-m))
 
 (defn pop-frame [ctx]
-  [nil (:parent ctx)])
+  [nil (assoc (:parent ctx)
+              :binding-sites (:binding-sites ctx))])
 
-(def null-context (struct context {} [] nil nil nil))
+(def null-context
+  (let [t (gensym)]
+    {:kind nil
+     :position :eval
+     :lexicals {}
+     :loop-locals []
+     :loop-label nil
+     :method nil
+     :fn nil
+     :catching nil
+     :clear-tag t
+     :clear-root t
+     :clear-kind :path
+     :binding-sites {}
+     :parent nil}))
 
 (defn valid-binding? [b ctx]
   (case (:kind b)
@@ -170,6 +208,162 @@
                :loop-locals (:loop-locals parent))))))
 
 (load "cljc/util")
+
+(defn etype [x]
+  (if (nil? x)
+    ::null
+    (if-let [m (meta x)]
+      (::etype m)
+      (class x))))
+
+(def *breaker* 0)
+
+(defn syncat [x]
+  (if (> *breaker* 100) (throw (Exception. "Broken")))
+  (set! *breaker* (inc *breaker*))
+  (println "Analyzing --> " x)
+  (cond
+    (nil? x) ::null
+    (symbol? x) ::symbol
+    (string? x) ::string
+    (keyword? x) ::keyword
+    (and (coll? x) (empty? x)) ::empty
+    (seq? x) [::special (first x)]
+    (vector? x) ::vector
+    (map? x) ::map
+    :else ::constant))
+
+(defmulti analyze syncat)
+(defmethod analyze :default
+  [form]
+  (fn [ctx]
+    (throw (IllegalArgumentException.
+             (str "Can't analyze " form)))))
+
+(defmethod analyze ::null
+  [form]
+  (with-monad state-m
+    (m-result nil)))
+
+(defmethod analyze ::symbol
+  [sym]
+  (fn [ctx]
+    (let [[lex ctx] (resolve-lexical sym ctx)]
+      (if-not lex
+        ['var ctx]
+        ((make-binding-instance lex) ctx)))))
+
+(defmethod analyze [::special 'recur]
+  [[_ & inits :as form]]
+  (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
+    (cond
+      (or (not= position :return) (nil? loop-label))
+      (throw (Exception. "Can only recur from tail position"))
+
+      catching
+      (throw (Exception. "Cannot recur from catch/finally"))
+
+      (not (== (count inits) (count loop-locals)))
+      (throw (Exception.
+        (format "Mismatched argument count to recur, expected: %d args, got %d"
+                (count loop-locals)
+                (count inits))))
+
+      :valid
+      (let [[inits ctx]
+            ((m-map analyze inits) ctx)
+            analyzed-form (list* 'recur inits)]
+        [(with-meta analyzed-form
+                    (merge (meta form)
+                           {::etype ::recur
+                            ::loop-label loop-label
+                            ::loop-locals loop-locals}))
+         ctx]))))
+
+(defmethod analyze [::special 'if]
+  [[_ test-expr then else :as form]]
+  (cond
+    (> (count form) 4)
+    (throw (Exception. "Too many arguments to if"))
+
+    (< (count form) 3)
+    (throw (Exception. "Too few arguments to if"))
+
+    :else
+    (domonad state-m
+      [test-expr (analyze test-expr)
+       _ (push-clear-node :branch false)
+       _ (push-clear-node :path false)
+       then (analyze then)
+       _ pop-frame
+       _ (push-clear-node :path false)
+       else (analyze else)
+       _ pop-frame
+       _ pop-frame]
+      (with-meta `(if ~test-expr ~then ~else)
+                 (merge (meta form)
+                        {::etype ::if})))))
+
+(declare analyze-loop)
+
+(defmethod analyze [::special 'let*]
+  [form]
+  (analyze-loop form false))
+
+(defmethod analyze [::special 'loop]
+  [form]
+  (analyze-loop form true))
+
+(defn analyze-init
+  [[sym init]]
+  (cond
+    (not (symbol? sym))
+    (throw (IllegalArgumentException.
+             (str "Bad binding form, expected symbol, got: " sym)))
+
+    (namespace sym)
+    (throw (IllegalArgumentException.
+             (str "Can't let qualified name: " sym)))
+
+    :else
+    (domonad state-m
+      [init (analyze init)
+       lb (make-binding sym nil)]
+      ; maybe coerce init
+      [lb init])))
+
+(defn analyze-loop0
+  [bindings body loop?]
+  (domonad state-m
+    [_ (push-frame)
+     bindings (m-map analyze-init (partition 2 bindings))
+     _ (set-val :loop-locals (map first bindings))
+     _ (if loop? (set-val :position :return) (m-result nil))
+     _ (if loop? (push-clear-node :path true) (m-result nil))
+     body (analyze (first body));`(~'do ~@body)
+     _ (if loop? pop-frame (m-result nil))
+     _ pop-frame]
+    (with-meta `(let* ~bindings ~body)
+               {::etype (if loop? ::loop ::let)})))
+
+(defn analyze-loop
+  [[_ bindings & body :as form] loop?]
+  (cond
+    (not (vector? bindings))
+    (throw (IllegalArgumentException. "Bad binding form, expected vector"))
+
+    (odd? (count bindings))
+    (throw (IllegalArgumentException.
+             "Bad binding form, expected matching symbol expression pairs"))
+
+    :else
+    (domonad state-m
+      [pos (fetch-val :position)
+       r (if (or (= pos :eval)
+                 (and loop? (= pos :expression)))
+           (analyze `(fn* [] ~form))
+           (analyze-loop0 bindings body loop?))]
+      r)))
 
 ;; context values
 ;; :statement :expression :return :eval

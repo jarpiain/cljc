@@ -1,7 +1,8 @@
 (ns org.subluminal.compiler
   (:import (java.io Reader)
+           (java.util IdentityHashMap)
            (clojure.lang LineNumberingPushbackReader
-                         RT Var Symbol Keyword))
+                         RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads))
   (:require (org.subluminal [class-file :as asm])))
 
@@ -47,16 +48,19 @@
            :live
            :clear-path)
 
-(defn make-binding [sym jtype]
-  (fn [ctx]
-    (let [b {:symbol sym
-             :label (gensym)
-             :kind :local
-             :method (:method ctx)
-             :java-type jtype
-             :clear-root (:clear-root ctx)}]
-      [b (update-in ctx [:lexicals]
-                    assoc sym b)])))
+(defn make-binding
+  ([sym jtype] (make-binding sym jtype :local))
+  ([sym jtype kind]
+   (fn [ctx]
+     (println "binding a" kind "in m-tag" (:method-tag (:method ctx)))
+     (let [b {:symbol sym
+              :label (gensym)
+              :kind kind
+              :method (:method ctx)
+              :java-type jtype
+              :clear-root (:clear-root ctx)}]
+       [b (update-in ctx [:lexicals]
+                     assoc sym b)]))))
 
 (defn clear-path [b]
   (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
@@ -79,6 +83,7 @@
 
 (defn make-binding-instance [b]
   (fn [ctx]
+    (println "clear-root b=" (:clear-root b) "vs ctx=" (:clear-root ctx))
     (let [inst (assoc b :clear-path ctx
                         :live (atom (not= (:clear-root b)
                                           (:clear-root ctx))))
@@ -114,21 +119,31 @@
     Object))
 
 (defn push-fn-context [f]
-  (fn [ctx]
-    [nil (assoc ctx
-                :parent ctx
-                :fn f)]))
+  (let [f (assoc f
+                 :constants []
+                 :constant-ids (IdentityHashMap.)
+                 :keywords {}
+                 :vars {}
+                 :keyword-callsites {}
+                 :var-callsites {}
+                 :closed-lexicals {})]
+    (fn [ctx]
+      [nil (assoc ctx
+                  :parent ctx
+                  :fn f)])))
 
 (defn push-method-context [m]
+  (println "Setting loop-label->" (:loop-label m))
   (fn [ctx]
     [nil
      (assoc ctx
+            :position :return
             :parent ctx
-            :method m
-            :lexicals (merge (:lexicals ctx)
-                             (:method-params m))
-            :loop-label (:loop-label m)
-            :loop-locals (:loop-locals m))]))
+            :method (assoc m :method-tag (gensym))
+;            :lexicals (merge (:lexicals ctx)
+;                             (:params m))
+            :loop-label (:loop-label m))]))
+;            :loop-locals (:loop-locals m))]))
 
 (defn push-clear-node [kind root?]
   (fn [ctx]
@@ -169,10 +184,14 @@
      :parent nil}))
 
 (defn valid-binding? [b ctx]
+  (println "Checking" (:kind b) "tagged"
+           (:method-tag (:method b))
+           "from" (:method-tag (:method ctx)))
   (case (:kind b)
     :closed (= (:fn b) (:fn ctx))
     (:local :fnarg)
-    (= (:method b) (:method ctx))))
+    (= (:method-tag (:method b))
+       (:method-tag (:method ctx)))))
 
 (defn close-over [b]
   (fn updater [ctx]
@@ -181,6 +200,7 @@
       (let [ctx (updater (:parent ctx))
             bb (get-in ctx [:lexicals (:symbol b)])
             clos (:closed-lexicals (:fn ctx))]
+        (println "building a closure...")
         (-> ctx
           (update-in [:lexicals (:symbol b)]
                      assoc :kind :closed
@@ -216,12 +236,7 @@
       (::etype m)
       (class x))))
 
-(def *breaker* 0)
-
 (defn syncat [x]
-  (if (> *breaker* 100) (throw (Exception. "Broken")))
-  (set! *breaker* (inc *breaker*))
-  (println "Analyzing --> " x)
   (cond
     (nil? x) ::null
     (or (true? x) (false? x)) ::boolean
@@ -234,8 +249,8 @@
     (map? x) ::map
     :else ::constant))
 
-(defmulti analyze syncat)
-(defmethod analyze :default
+(defmulti analyze syncat :default ::invocation)
+#_(defmethod analyze :default
   [form]
   (fn [ctx]
     (throw (IllegalArgumentException.
@@ -282,6 +297,18 @@
     (with-meta `(~'monitor-exit ~lockee)
                {::etype ::monitor-exit})))
 
+(defmethod analyze ::invocation
+  [[op & args :as form]]
+  (domonad state-m
+    [pos (update-val :position #(if (= % :eval) :eval :expression))
+     op (analyze op)
+     ;; special case: instanceof
+     ;; special case: keyword invoke, static invoke
+     args (m-map analyze args)
+     _ (set-val :position pos)]
+    (with-meta `(~op ~@(doall args))
+               {::etype ::invocation})))
+
 (defmethod analyze [::special 'set!]
   [[_ target value :as form]]
   (if (not= (count form) 3)
@@ -300,6 +327,7 @@
 (defmethod analyze [::special 'recur]
   [[_ & inits :as form]]
   (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
+    (println "position =" position "in recur")
     (cond
       (or (not= position :return) (nil? loop-label))
       (throw (Exception. "Can only recur from tail position"))
@@ -315,7 +343,7 @@
 
       :valid
       (let [[inits ctx]
-            ((m-map analyze inits) ctx)
+            ((with-monad state-m (m-map analyze inits)) ctx)
             analyzed-form (list* 'recur inits)]
         [(with-meta analyzed-form
                     (merge (meta form)
@@ -427,9 +455,131 @@
            (analyze-loop0 bindings body loop?))]
       r)))
 
-;; context values
-;; :statement :expression :return :eval
+(defn normalize-fn*
+  [[op & opts :as form]]
+  (let [this-name (when (symbol? (first opts)) (first opts))
+        static? (:static (meta this-name))]
+    (domonad state-m
+      [n (if this-name
+           (m-result this-name)
+           (fetch-val :name))
+       enc (fetch-val :enclosing-method)]
+    (let [opts (if (symbol? (first opts))
+                 (next opts)
+                 opts)
+          methods (if (vector? (first opts))
+                    (list opts)
+                    opts)
+          base-name (if enc
+                      (str (:name enc) "$")
+                      (str (munge-impl (name (ns-name *ns*))) "$"))
+          simple-name (if n
+                        (str (.replace (munge-impl (name n)) "." "_DOT_")
+                             (if enc (str "__" (RT/nextID)) ""))
+                        (str "fn__" (RT/nextID)))]
+      (with-meta `(~'fn* ~@methods)
+                 {:src form
+                  :this-name this-name
+                  :enclosing-method enc
+                  :static? static?
+                  :once-only (:once (meta op))
+                  :name (symbol (str base-name simple-name))})))))
 
+(declare analyze-method)
+
+(defmethod analyze [::special 'fn*]
+  [[op & opts :as form]]
+  (domonad state-m
+    [[op & meth :as norm] (normalize-fn* form)
+     _ (push-fn-context (meta norm))
+     meth (m-map analyze-method meth)
+     f (fetch-val :fn)
+     _ (pop-frame)]
+    nil))
+
+(defn process-fn*-args [argv static?]
+  (loop [req-params [] rest-param nil state :req remain argv]
+    (if-not (seq remain)
+      {:required-params req-params
+       :rest-param rest-param}
+      (let [arg (first remain)]
+        (cond
+          (not (symbol? arg))
+          (throw (Exception. "fn params must be symbols."))
+
+          (namespace arg)
+          (throw (Exception. "Can't use qualified name as parameter: " arg))
+
+          (= arg '&)
+          (if (= state :req)
+            (recur req-params rest-param :rest (next remain))
+            (throw (Exception. "Invalid parameter list")))
+
+          :else
+          (let [c (tag-class (tag-of arg))
+                c (if (= state :rest) ISeq c)]
+            (cond
+              (and (.isPrimitive c) (not static?))
+              (throw (Exception.
+                (str "Non-static fn can't have primitive parameter: " arg)))
+
+              (and (.isPrimitive c)
+                   (not (or (= c Long/TYPE) (= c Double/TYPE))))
+              (throw (IllegalArgumentException.
+                (str "Only long and double primitives are supported: " arg)))
+
+              (and (= state :rest) (not= (tag-of arg) nil))
+              (throw (Exception. "& arg can't have type hint")))
+            (recur (if (= state :req)
+                     (conj req-params [arg c])
+                     req-params)
+                   (if (= state :rest)
+                     [arg c]
+                     nil)
+                   (if (= state :rest)
+                     :done
+                     state)
+                   (next remain))))))))
+
+(defn variadic? [argv]
+  (not (nil? (:rest-param argv))))
+
+(defn analyze-method
+  [[argv & body]]
+  (if (not (vector? argv))
+    (throw (IllegalArgumentException.
+             "Malformed method, expected argument vector"))
+    (let [ret-class (tag-class (tag-of argv))]
+      (when (and (.isPrimitive ret-class)
+                 (not (or (= ret-class Long/TYPE) (= ret-class Double/TYPE))))
+        (throw (IllegalArgumentException.
+                 "Only long and double primitives are supported")))
+      (domonad state-m
+        [{:keys [this-name static?] :as this-fn} (fetch-val :fn)
+         argv (m-result (process-fn*-args argv static?))
+         _ (push-method-context {       #_(if static?
+                                           (zipmap argv bind)
+                                           (zipmap (cons (or this-name (gensym))
+                                                         bind)
+                                                   (cons thisb bind)))
+                                 :loop-label (gensym)
+                                 :loop-locals nil})
+         _ (push-clear-node :path true)
+         thisb (if static?
+                 (m-result nil)
+                 (make-binding (or this-name (gensym)) IFn :fnarg))
+         bind (m-map (fn [[s t]] (make-binding s t :fnarg))
+                     (if (variadic? argv)
+                       (conj (:required-params argv)
+                             (:rest-param argv))
+                       (:required-params argv)))
+         _ (update-val :method #(assoc % :loop-locals bind))
+         _ (set-val :loop-locals bind)
+         body (analyze `(~'do ~@body))
+         m (fetch-val :method)
+         _ pop-frame
+         _ pop-frame]
+        [m body]))))
 
 (derive ::if ::maybe-primitive)
 (derive ::let ::maybe-primitive)

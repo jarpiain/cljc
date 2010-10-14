@@ -44,14 +44,14 @@
 ;    (when v (register-var v))
     v))
 
-(defn close-over [binding method]
+#_(defn close-over [binding method]
   (when (and binding method
              (not (contains? (:locals method) binding)))
     (dosync
       (alter method update-in [:closes] assoc binding binding))
     (close-over binding (:parent method))))
 
-(defn reference-local [sym]
+#_(defn reference-local [sym]
   (if-not (bound? #'*local-env*)
     nil
     (let [b (get *local-env* sym)]
@@ -59,7 +59,7 @@
         (close-over *method* b))
       b)))
 
-(defn the-macro [sym]
+#_(defn the-macro [sym]
   (cond
     ;; local macros...
     (and (symbol? sym) (reference-local sym))
@@ -120,3 +120,100 @@
    'varintern [Var     "intern"   [:method Var [String String]]]
    'getclass  [Class   "getClass" [:method Class []]]
    'get-class-loader [Class "getClassLoader" [:method ClassLoader []]]})
+
+(def +char-map+
+  {\- "_"
+   \: "_COLON_"
+   \+ "_PLUS_"
+   \> "_GT_"
+   \< "_LT_"
+   \= "_EQ_"
+   \~ "_TILDE_"
+   \! "_BANG_"
+   \@ "_CIRCA_"
+   \# "_SHARP_"
+   \$ "_DOLLARSIGN_"
+   \% "_PERCENT_"
+   \^ "_CARET_"
+   \& "_AMPERSAND_"
+   \* "_STAR_"
+   \| "_BAR_"
+   \{ "_LBRACE_"
+   \} "_RBRACE_"
+   \[ "_LBRACK_"
+   \] "_RBRACK_"
+   \/ "_SLASH_"
+   \\ "_BSLASH_"
+   \? "_QMARK_"})
+
+(defn munge-impl [s]
+  (apply str (map #(get +char-map+ % %) s)))
+
+(defn maybe-class
+  [tag string-ok?]
+  (cond
+    (class? tag) tag
+
+    (and (symbol? tag) (not (namespace tag)))
+    (cond
+;      (= tag *compile-stub-sym*)
+;      *compile-stub-class*
+
+      (or (> (.indexOf (name tag) (int \.)) 0)
+          (= (.charAt (name tag) 0) (int \[)))
+      (RT/classForName (name tag))
+
+      :else
+      (try
+        (let [c (resolve tag)]
+          (if (class? c) c
+            (RT/classForName (name tag))))
+        (catch ClassNotFoundException e
+          nil)))
+
+    (and string-ok? (string? tag))
+    (RT/classForName ^String tag)))
+
+(def prim-class
+  {'int Integer/TYPE
+   'long Long/TYPE
+   'double Double/TYPE
+   'float Float/TYPE
+   'char Character/TYPE
+   'short Short/TYPE
+   'byte Byte/TYPE
+   'boolean Boolean/TYPE
+   'void Void/TYPE })
+
+(def array-tags
+   {'objects (class (make-array Object 0))
+    'ints (class (int-array 0))
+    'longs (class (long-array 0))
+    'floats (class (float-array 0))
+    'doubles (class (double-array 0))
+    'bytes (class (byte-array 0))
+    'shorts (class (short-array 0))
+    'chars (class (char-array 0))
+    'booleans (class (boolean-array 0))})
+
+(defn tag-to-class [tag]
+  (if-let [c (array-tags tag)] c
+    (if-let [c (maybe-class tag true)] c
+      (throw (IllegalArgumentException.
+               (str "Unable to resolve classname: " tag))))))
+
+(defn tag-class [tag]
+  (if (nil? tag)
+    Object
+    (if-let [c (prim-class tag)]
+      c
+      (tag-to-class tag))))
+
+(defn tag-of [thing]
+  (let [tag (:tag (meta thing))]
+    (cond
+      (symbol? tag)
+      tag
+      (string? tag)
+      (symbol tag)
+      :else nil)))

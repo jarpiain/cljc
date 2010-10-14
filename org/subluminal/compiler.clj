@@ -59,7 +59,7 @@
                     assoc sym b)])))
 
 (defn clear-path [b]
-  (let [p (reverse (take-while identity (iterate :clear-path b)))]
+  (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
     (println "clear-path" (:symbol b)
              (map (juxt :clear-tag :clear-kind) p))
     p))
@@ -79,7 +79,7 @@
 
 (defn make-binding-instance [b]
   (fn [ctx]
-    (let [inst (assoc b :clear-path (:clear-path ctx)
+    (let [inst (assoc b :clear-path ctx
                         :live (atom (not= (:clear-root b)
                                           (:clear-root ctx))))
           lives (get-in ctx [:binding-sites (:label b)])
@@ -224,6 +224,7 @@
   (println "Analyzing --> " x)
   (cond
     (nil? x) ::null
+    (or (true? x) (false? x)) ::boolean
     (symbol? x) ::symbol
     (string? x) ::string
     (keyword? x) ::keyword
@@ -245,6 +246,16 @@
   (with-monad state-m
     (m-result nil)))
 
+(defmethod analyze ::boolean
+  [form]
+  (with-monad state-m
+    (m-result form)))
+
+(defmethod analyze ::keyword
+  [form]
+  (with-monad state-m
+    (m-result form)))
+
 (defmethod analyze ::symbol
   [sym]
   (fn [ctx]
@@ -252,6 +263,39 @@
       (if-not lex
         ['var ctx]
         ((make-binding-instance lex) ctx)))))
+
+(defmethod analyze [::special 'monitor-enter]
+  [[_ lockee]]
+  (domonad state-m
+    [pos (set-val :position :expression)
+     lockee (analyze lockee)
+     _ (set-val :position pos)]
+    (with-meta `(~'monitor-enter ~lockee)
+               {::etype ::monitor-enter})))
+
+(defmethod analyze [::special 'monitor-exit]
+  [[_ lockee]]
+  (domonad state-m
+    [pos (set-val :position :expression)
+     lockee (analyze lockee)
+     _ (set-val :position pos)]
+    (with-meta `(~'monitor-exit ~lockee)
+               {::etype ::monitor-exit})))
+
+(defmethod analyze [::special 'set!]
+  [[_ target value :as form]]
+  (if (not= (count form) 3)
+    (throw (IllegalArgumentException.
+             "Malformed assignment, expecting (set! target val)"))
+    (domonad state-m
+      [pos (set-val :position :expression)
+       target (analyze target)
+       value (analyze value)
+       _ (set-val :position pos)]
+      (if (isa? (etype target) ::assignable)
+        (with-meta `(~'set! ~target ~value)
+                   {::etype ::set!})
+        (throw (IllegalArgumentException. "Invalid assignment target"))))))
 
 (defmethod analyze [::special 'recur]
   [[_ & inits :as form]]
@@ -279,6 +323,24 @@
                             ::loop-label loop-label
                             ::loop-locals loop-locals}))
          ctx]))))
+
+(defmethod analyze [::special 'do]
+  [[_ & body]]
+  (cond
+    (empty? body)
+    (analyze nil)
+
+    (empty? (next body))
+    (analyze (first body))
+
+    :else
+    (domonad state-m
+      [pos (set-val :position :statement)
+       stmts (m-map analyze (butlast body))
+       _ (set-val :position pos)
+       tail (analyze (last body))]
+      (with-meta `(~'do ~@stmts ~tail)
+                 {::etype ::do}))))
 
 (defmethod analyze [::special 'if]
   [[_ test-expr then else :as form]]
@@ -340,10 +402,10 @@
      _ (set-val :loop-locals (map first bindings))
      _ (if loop? (set-val :position :return) (m-result nil))
      _ (if loop? (push-clear-node :path true) (m-result nil))
-     body (analyze (first body));`(~'do ~@body)
+     body (analyze `(~'do ~@body))
      _ (if loop? pop-frame (m-result nil))
      _ pop-frame]
-    (with-meta `(let* ~bindings ~body)
+    (with-meta `(~'let* ~bindings ~body)
                {::etype (if loop? ::loop ::let)})))
 
 (defn analyze-loop

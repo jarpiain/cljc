@@ -335,11 +335,11 @@
 
     :else
     (domonad state-m
-      [pos (set-val :position :statement)
+      [pos (update-val :position #(if (= % :eval) :eval :statement))
        stmts (m-map analyze (butlast body))
        _ (set-val :position pos)
        tail (analyze (last body))]
-      (with-meta `(~'do ~@stmts ~tail)
+      (with-meta `(~'do ~@(doall stmts) ~tail)
                  {::etype ::do}))))
 
 (defmethod analyze [::special 'if]

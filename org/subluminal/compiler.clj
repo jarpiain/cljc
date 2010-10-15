@@ -8,13 +8,12 @@
 
 
 (defstruct context
-           :kind        ; :fn :method :loop :let :catch
            :position    ; :eval :statement :expression :return
            :lexicals    ; symbol -> struct lex-binding
            :loop-locals ; vector lex-binding
            :loop-label  ; symbol
-           :method      ; method form
-           :fn          ; struct fn-class
+           :method      ; gensym --> index
+           :fn          ; gensym --> index
            :catching    ; catch-finally
 
            :clear-tag   ; gensym - identity
@@ -22,7 +21,88 @@
            :clear-kind  ; :branch :path
            :clear-path  ; seq of context
            :binding-sites ; map of label -> lex-binding-inst
+           :index
            :parent)     ; context
+
+(defn current-method [ctx]
+  [(get (:index ctx) (:method ctx)) ctx])
+
+(defn current-object [ctx]
+  [(get (:index ctx) (:fn ctx)) ctx])
+
+(defn push-object-frame [f]
+  (let [tag (gensym "OBJ__")
+        f (assoc f
+                 :fn-tag tag
+                 :constants []
+                 :constant-ids (IdentityHashMap.)
+                 :keywords {}
+                 :vars {}
+                 :keyword-callsites {}
+                 :var-callsites {}
+                 :closed-lexicals (sorted-map))]
+    (fn [ctx]
+      (let [enc (:method ctx)]
+        [nil (assoc ctx
+                    :parent ctx
+                    :fn tag
+                    :index (assoc (:index ctx) tag
+                                  (assoc f :enclosing-method enc)))]))))
+
+(defn push-method-frame [m]
+  (let [tag (gensym "MT__")
+        ct (gensym "CN__")
+        m (assoc m :method-tag tag)]
+    (fn [ctx]
+      (let [obj (:fn ctx)]
+        [nil
+         (assoc ctx
+                :position :return
+                :parent ctx
+                :method tag
+                :loop-label (:loop-label m)
+                :clear-tag ct
+                :clear-path ctx
+                :clear-root ct
+                :clear-kind :path
+                :index (assoc (:index ctx) tag
+                              (assoc m :containing-object obj)))]))))
+
+(defn push-clear-node [kind root?]
+  (fn [ctx]
+    (let [tag (gensym "NN")]
+      [nil
+       (assoc ctx
+              :parent ctx
+              :clear-tag tag
+              :clear-path ctx
+              :clear-kind kind
+              :clear-root (if root? tag (:clear-root ctx)))])))
+
+(defn push-frame []
+  (fn [ctx]
+    [nil (assoc ctx :parent ctx)]))
+
+(defn pop-frame [ctx]
+  [nil (assoc (:parent ctx)
+              :binding-sites (:binding-sites ctx)
+              :index (:index ctx))])
+
+(def null-context
+  (let [t (gensym "NULL")]
+    {:position :eval
+     :lexicals {}
+     :loop-locals []
+     :loop-label nil
+     :method nil
+     :fn nil
+     :index {}
+     :catching nil
+     :clear-tag t
+     :clear-root t
+     :clear-kind :path
+     :binding-sites {}
+     :parent nil}))
 
 (defstruct fn-class
            :symbol ; may be nil
@@ -52,12 +132,12 @@
   ([sym jtype] (make-binding sym jtype :local))
   ([sym jtype kind]
    (fn [ctx]
-     (println "binding a" kind "in m-tag" (:method-tag (:method ctx)))
+     ;(println "binding" sym kind "in m-tag" (:method ctx))
      (let [b {:symbol sym
               :label (gensym "BB")
               :kind kind
-              :method-tag (:method-tag (:method ctx))
-              :fn-tag (:fn-tag (:fn ctx))
+              :method-tag (:method ctx)
+              :fn-tag (:fn ctx)
               :java-type jtype
               :clear-root (:clear-root ctx)}]
        [b (update-in ctx [:lexicals]
@@ -65,15 +145,16 @@
 
 (defn clear-path [b]
   (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
-    (println "clear-path" (:symbol b)
-             (map (juxt :clear-tag :clear-kind) p))
+    ;(println "clear-path" (:symbol b)
+    ;         (map (juxt :clear-tag :clear-kind) p))
     p))
 
 (defn join-point [b1 b2]
   (loop [p1 (clear-path b1) p2 (clear-path b2)]
     (cond
       (not= (:clear-tag (first p1)) (:clear-tag (first p2)))
-      (do (println "early out") nil)
+      nil
+      ;(do (println "early out") nil)
 
       (or (nil? (second p1)) (not= (:clear-tag (second p1))
                                    (:clear-tag(second p2))))
@@ -84,15 +165,15 @@
 
 (defn make-binding-instance [b]
   (fn [ctx]
-    (println "clear-root b=" (:clear-root b) "vs ctx=" (:clear-root ctx))
+    ;(println (:symbol b) "clear-root b=" (:clear-root b) "vs ctx=" (:clear-root ctx))
     (let [inst (assoc b :clear-path ctx
                         :live (atom (not= (:clear-root b)
                                           (:clear-root ctx))))
           lives (get-in ctx [:binding-sites (:label b)])
           lives (reduce (fn [coll inst2]
                           (let [j (join-point inst inst2)]
-                            (println "join for" (:symbol b)
-                                     "is" (:clear-kind j))
+                            ;(println "join for" (:symbol b)
+                            ;         "is" (:clear-kind j))
                             (if (not= (:clear-kind j) :branch)
                               (do (reset! (:live inst2) true) coll)
                               (conj coll inst2))))
@@ -102,7 +183,7 @@
        (assoc-in ctx [:binding-sites (:label b)]
                  (conj lives inst))])))
 
-(defn boxing-unify [x y]
+#_(defn boxing-unify [x y]
   (cond
     (= x y)
     x
@@ -119,100 +200,35 @@
     :else
     Object))
 
-(defn push-fn-context [f]
-  (let [f (assoc f
-                 :constants []
-                 :constant-ids (IdentityHashMap.)
-                 :keywords {}
-                 :vars {}
-                 :keyword-callsites {}
-                 :var-callsites {}
-                 :closed-lexicals {})]
-    (fn [ctx]
-      [nil (assoc ctx
-                  :parent ctx
-                  :fn f)])))
-
-(defn push-method-context [m]
-  (println "Setting loop-label->" (:loop-label m))
-  (fn [ctx]
-    [nil
-     (assoc ctx
-            :position :return
-            :parent ctx
-            :method (assoc m :method-tag (gensym "MT"))
-;            :lexicals (merge (:lexicals ctx)
-;                             (:params m))
-            :loop-label (:loop-label m))]))
-;            :loop-locals (:loop-locals m))]))
-
-(defn push-clear-node [kind root?]
-  (fn [ctx]
-    (let [tag (gensym "NN")]
-      [nil
-       (assoc ctx
-              :parent ctx
-              :clear-tag tag
-              :clear-path ctx
-              :clear-kind kind
-              :clear-root (if root? tag (:clear-root ctx)))])))
-
-(defn push-frame []
-  (fn [ctx]
-    [nil (assoc ctx :parent ctx)]))
-
-;(defn push-loop-context [inits]
-;  (domonad state-m))
-
-(defn pop-frame [ctx]
-  [nil (assoc (:parent ctx)
-              :binding-sites (:binding-sites ctx))])
-
-(def null-context
-  (let [t (gensym "NULL")]
-    {:kind nil
-     :position :eval
-     :lexicals {}
-     :loop-locals []
-     :loop-label nil
-     :method nil
-     :fn nil
-     :catching nil
-     :clear-tag t
-     :clear-root t
-     :clear-kind :path
-     :binding-sites {}
-     :parent nil}))
-
 (defn valid-binding? [b ctx]
-  (println "Checking" (:kind b) "tagged"
-           (:method-tag  b)
-           "from" (:method-tag (:method ctx)))
-  (case (:kind b)
-    :closed (= (:fn-tag b) (:fn-tag (:fn ctx)))
-    (:local :fnarg)
-    (= (:method-tag b)
-       (:method-tag (:method ctx)))))
+  ;(println "Checking" (:kind b) (:symbol b) "tagged"
+  ;         (:method-tag b)
+  ;         "from" (:method ctx))
+  (and
+    (= (:fn-tag b) (:fn ctx))))
+;    (= (:method-tag b) (:method-tag (:method ctx)))))
 
 (defn close-over [b]
   (fn updater [ctx]
-    (if (valid-binding? b ctx)
-      ctx
-      (let [ctx (updater (:parent ctx))
-            bb (get-in ctx [:lexicals (:symbol b)])
-            clos (:closed-lexicals (:fn ctx))]
-        (println "building a closure...")
-        (-> ctx
-          (update-in [:lexicals (:symbol b)]
-                     assoc :kind :closed
-                           :closed-idx (count clos))
-;                           :method-tag (:method ctx)
-          (update-in [:fn :closed-lexicals] conj bb))))))
+    ;(println "cl-index" (keys (:index ctx)))
+    (loop [obj (:fn ctx) ctx ctx]
+      ;(println "obj=" obj)
+      (assert obj)
+      (if (= obj (:fn-tag b))
+        ctx
+        ;(do (println "Closing " (:symbol b) (:label b))
+        ;  (println "Previous" (keys (get-in ctx [:index obj :closed-lexicals])))
+        (recur (->> obj
+                 (get (:index ctx))
+                 :enclosing-method
+                 (get (:index ctx))
+                 :containing-object)
+               (update-in ctx [:index obj :closed-lexicals]
+                          assoc (:label b) b))))))
 
 (defn resolve-lexical [sym ctx]
   (if-let [b (get (:lexicals ctx) sym)]
-    (let [ctx ((close-over b) ctx)
-          b (get (:lexicals ctx) sym)]
+    (let [ctx ((close-over b) ctx)]
       [b ctx])  
     [nil ctx]))
 
@@ -231,13 +247,11 @@
 (load "cljc/util")
 
 (defn etype [x]
-  (if (nil? x)
-    ::null
-    (if-let [m (meta x)]
-      (::etype m)
-      (class x))))
+  (::etype (meta x)))
 
-(defn syncat [x]
+(defn syncat
+  "The syntax category of a form. Dispatch function for analyze."
+  [x]
   (cond
     (nil? x) ::null
     (or (true? x) (false? x)) ::boolean
@@ -259,18 +273,21 @@
 
 (defmethod analyze ::null
   [form]
-  (with-monad state-m
-    (m-result nil)))
+  (fn [ctx]
+    [(with-meta [nil] {::etype ::null
+                       :position (:position ctx)})
+     ctx]))
 
 (defmethod analyze ::boolean
   [form]
   (with-monad state-m
-    (m-result form)))
+    (m-result (with-meta [form] {::etype ::boolean}))))
 
 (defmethod analyze ::keyword
   [form]
+  ;; register...
   (with-monad state-m
-    (m-result form)))
+    (m-result (with-meta [form] {::etype ::keyword}))))
 
 (defmethod analyze ::symbol
   [sym]
@@ -328,7 +345,6 @@
 (defmethod analyze [::special 'recur]
   [[_ & inits :as form]]
   (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
-    (println "position =" position "in recur")
     (cond
       (or (not= position :return) (nil? loop-label))
       (throw (Exception. "Can only recur from tail position"))
@@ -498,9 +514,9 @@
   [[op & opts :as form]]
   (domonad state-m
     [[op & meth :as norm] (normalize-fn* form)
-     _ (push-fn-context (meta norm))
+     _ (push-object-frame (meta norm))
      meth (m-map analyze-method meth)
-     f (fetch-val :fn)
+     f current-object
      _ pop-frame]
     (loop [a (vec (repeat (inc +max-positional-arity+) nil))
            variadic nil
@@ -519,7 +535,7 @@
         (do
           (when-let [[info _] variadic]
             (let [v-ar (arity info)]
-              (when (some identity (subvec a v-ar))
+              (when (some identity (subvec a (inc v-ar)))
                 (throw (Exception.
                          (str "Can't have fixed arity function"
                               " with more params than variadic function"))))))
@@ -580,9 +596,12 @@
 (defn variadic? [argv]
   (not (nil? (:rest-param argv))))
 
+(defn update-current-method [f & args]
+  (fn [ctx]
+    [nil (apply update-in ctx [:index (:method ctx)] f args)]))
+
 (defn analyze-method
   [[argv & body]]
-  (println "Analyzing" argv body)
   (if (not (vector? argv))
     (throw (IllegalArgumentException.
              "Malformed method, expected argument vector"))
@@ -594,9 +613,8 @@
       (domonad state-m
         [{:keys [this-name static?] :as this-fn} (fetch-val :fn)
          argv (m-result (process-fn*-args argv static?))
-         _ (push-method-context {:loop-label (gensym "LL")
-                                 :loop-locals nil})
-         _ (push-clear-node :path true)
+         _ (push-method-frame {:loop-label (gensym "LL")
+                               :loop-locals nil})
          thisb (if static?
                  (m-result nil)
                  (make-binding (or this-name (gensym "THIS")) IFn :fnarg))
@@ -605,11 +623,10 @@
                        (conj (:required-params argv)
                              (:rest-param argv))
                        (:required-params argv)))
-         _ (update-val :method #(assoc % :loop-locals bind))
+         _ (update-current-method assoc :loop-locals bind)
          _ (set-val :loop-locals bind)
          body (analyze `(~'do ~@body))
-         m (fetch-val :method)
-         _ pop-frame
+         m current-method
          _ pop-frame]
         [(assoc m
                 :argv argv
@@ -634,42 +651,6 @@
 ;;;; Analyze
 ;; tags a form with ::etype
 ;; (maybe also ::can-emit-primitive? ::java-class)
-
-(declare analyze-seq analyze-symbol analyze-fn)
-(defmulti analyze-special first)
-
-(defn analyze
-  ([ctx form] (analyze ctx form nil))
-  ([ctx form name]
-   (let [form (if (instance? LazySeq form)
-                (or (seq form) ())
-                form)
-         cls (class form)]
-     (cond
-       (or (true? form) (false? form) (nil? form)) form
-       (= cls Symbol) (analyze-symbol ctx form)
-       (= cls Keyword) (register-keyword form)
-       (isa? cls Number) form
-       (= cls String) form
-
-       (and (coll? form) (empty? form))
-       (with-meta form {::etype ::empty})
-
-       (seq? form)
-       (analyze-seq ctx form name)
-
-       (vector? form)
-       (with-meta form {::etype ::vector})
-
-       (map? form)
-       (with-meta form {::etype ::map})
-
-       (set? form)
-       (with-meta form {::etype ::set})
-
-       :else
-       (with-meta [form] {::etype ::constant})))))
-
 
 (defmulti gen (fn [form ctx] (etype form)))
 (defmulti literal-val etype)

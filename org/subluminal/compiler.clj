@@ -258,12 +258,30 @@
     (map? x) ::map
     :else ::constant))
 
-(defmulti analyze syncat :default ::invocation)
-#_(defmethod analyze :default
+(defmulti analyze
+  "Annotate a form with information about lexical context
+  required to generate bytecode"
+  syncat :default ::invocation)
+
+(defmulti gen
+  "Generate bytecode from an analyzed form"
+  etype :default ::invalid)
+
+(defn tea "Test analysis"
+  ([form] (tea form :expression))
+  ([form pos] (first ((analyze form) (assoc null-context :position pos)))))
+(defn teg "Test gen"
+  ([form] (gen (tea form)))
+  ([form pos] (gen (tea form pos))))
+
+(defn pos [form] (:position (meta form)))
+
+(defmethod gen ::invalid
   [form]
-  (fn [ctx]
-    (throw (IllegalArgumentException.
-             (str "Can't analyze " form)))))
+  (throw (IllegalArgumentException.
+           (str "Invalid form " form))))
+
+;;;; nil
 
 (defmethod analyze ::null
   [form]
@@ -272,12 +290,28 @@
                        :position (:position ctx)})
      ctx]))
 
+(defmethod gen ::null
+  [form]
+  `([:aconst-null]
+    ~@(if (= (pos form) :statement)
+        `([:pop]))))
+
+;;;; boolean literals
+
 (defmethod analyze ::boolean
   [form]
   (fn [ctx]
     [(with-meta [form] {::etype ::boolean
                         :position (:position ctx)})
      ctx]))
+
+(defmethod gen ::boolean
+  [[bool :as form]]
+  `(~(if bool
+       [:getstatic [Boolean 'TRUE Boolean]]
+       [:getstatic [Boolean 'FALSE Boolean]])
+    ~@(if (= (pos form) :statement)
+        `([:pop]))))
 
 (defmethod analyze ::keyword
   [form]
@@ -666,7 +700,6 @@
 ;; tags a form with ::etype
 ;; (maybe also ::can-emit-primitive? ::java-class)
 
-(defmulti gen (fn [form ctx] (etype form)))
 (defmulti literal-val etype)
 
 (defmethod literal-val :default
@@ -676,18 +709,6 @@
 (defmethod analyze-special :default
   [form]
   (throw (IllegalArgumentException. (str "Unrecognized special form " form))))
-
-(defmethod gen :default
-  [form _ _]
-  (throw (IllegalArgumentException. (str "Can't eval " form))))
-
-;; clojure.core/import* deftype* new reify*
-(def +specials+
-  #{'def 'loop 'recur 'if 'let* 'letfn*
-    'do 'fn* 'quote 'var 'import* '.
-    'set! 'try 'throw 'monitor-enter
-    'monitor-exit 'catch 'finally
-    'new})
 
 (defn analyze-seq
   [ctx form name]
@@ -779,24 +800,11 @@
   [form]
   nil)
 
-(defmethod gen ::null
-  [form ctx]
-  `([:aconst-null]
-    ~@(when (= ctx :statement) [[:pop]])))
-
 ;;;; boolean literal
 
 (defmethod literal-val Boolean
   [form]
   form)
-
-(defmethod gen Boolean
-  [form ctx]
-  `(~(if form
-       [:getstatic [Boolean 'TRUE Boolean]]
-       [:getstatic [Boolean 'FALSE Boolean]])
-    ~@(when (= ctx :statement)
-        [[:pop]])))
 
 ;;;; String literal
 

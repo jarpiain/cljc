@@ -369,6 +369,8 @@
     [:monitorexit]
     ~@(gen-nil (pos form))))
 
+;;;; fn invocation
+
 (defmethod analyze ::invocation
   [[op & args :as form]]
   (domonad state-m
@@ -381,6 +383,14 @@
     (with-meta `(~op ~@(doall args))
                {::etype ::invocation
                 :position pos})))
+
+(defmethod gen ::invocation
+  [[op & args :as form]]
+  `(~@(gen op)
+    [:checkcast ~IFn]
+    ~@(mapcat gen args)
+    [:invokeinterface ~[IFn 'invoke [:method Object (take (count args)
+                                                          (repeat Object))]]]))
 
 (defmethod analyze [::special 'set!]
   [[_ target value :as form]]

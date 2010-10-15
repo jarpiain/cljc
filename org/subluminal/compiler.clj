@@ -2,6 +2,7 @@
   (:import (java.io Reader)
            (java.util IdentityHashMap)
            (clojure.lang LineNumberingPushbackReader
+                         LazySeq
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads))
   (:require (org.subluminal [class-file :as asm])))
@@ -246,17 +247,20 @@
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
   [x]
-  (cond
-    (nil? x) ::null
-    (or (true? x) (false? x)) ::boolean
-    (symbol? x) ::symbol
-    (string? x) ::string
-    (keyword? x) ::keyword
-    (and (coll? x) (empty? x)) ::empty
-    (seq? x) [::special (first x)]
-    (vector? x) ::vector
-    (map? x) ::map
-    :else ::constant))
+  (let [x (if (instance? LazySeq x)
+            (if-let [sx (seq x)] sx ())
+            x)]
+    (cond
+      (nil? x) ::null
+      (or (true? x) (false? x)) ::boolean
+      (symbol? x) ::symbol
+      (string? x) ::string
+      (keyword? x) ::keyword
+      (and (coll? x) (empty? x)) ::empty
+      (seq? x) [::special (first x)]
+      (vector? x) ::vector
+      (map? x) ::map
+      :else ::constant)))
 
 (defmulti analyze
   "Annotate a form with information about lexical context
@@ -266,6 +270,9 @@
 (defmulti gen
   "Generate bytecode from an analyzed form"
   etype :default ::invalid)
+
+(defmulti java-class etype)
+(defmulti literal-val etype)
 
 (defn tea "Test analysis"
   ([form] (tea form :expression))
@@ -299,6 +306,14 @@
   [form]
   (gen-nil (pos form)))
 
+(defmethod java-class ::null
+  [_]
+  nil)
+
+(defmethod literal-val [::null]
+  [_]
+  nil)
+
 ;;;; boolean literals
 
 (defmethod analyze ::boolean
@@ -315,6 +330,14 @@
        [:getstatic [Boolean 'FALSE Boolean]])
     ~@(if (= (pos form) :statement)
         `([:pop]))))
+
+(defmethod java-class ::boolean
+  [_]
+  Boolean)
+
+(defmethod literal-val ::boolean
+  [[form]]
+  form)
 
 (defmethod analyze ::keyword
   [form]

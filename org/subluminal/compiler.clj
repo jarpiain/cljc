@@ -165,15 +165,12 @@
 
 (defn make-binding-instance [b]
   (fn [ctx]
-    ;(println (:symbol b) "clear-root b=" (:clear-root b) "vs ctx=" (:clear-root ctx))
     (let [inst (assoc b :clear-path ctx
                         :live (atom (not= (:clear-root b)
                                           (:clear-root ctx))))
           lives (get-in ctx [:binding-sites (:label b)])
           lives (reduce (fn [coll inst2]
                           (let [j (join-point inst inst2)]
-                            ;(println "join for" (:symbol b)
-                            ;         "is" (:clear-kind j))
                             (if (not= (:clear-kind j) :branch)
                               (do (reset! (:live inst2) true) coll)
                               (conj coll inst2))))
@@ -210,14 +207,10 @@
 
 (defn close-over [b]
   (fn updater [ctx]
-    ;(println "cl-index" (keys (:index ctx)))
     (loop [obj (:fn ctx) ctx ctx]
-      ;(println "obj=" obj)
       (assert obj)
       (if (= obj (:fn-tag b))
         ctx
-        ;(do (println "Closing " (:symbol b) (:label b))
-        ;  (println "Previous" (keys (get-in ctx [:index obj :closed-lexicals])))
         (recur (->> obj
                  (get (:index ctx))
                  :enclosing-method
@@ -226,11 +219,12 @@
                (update-in ctx [:index obj :closed-lexicals]
                           assoc (:label b) b))))))
 
-(defn resolve-lexical [sym ctx]
-  (if-let [b (get (:lexicals ctx) sym)]
-    (let [ctx ((close-over b) ctx)]
-      [b ctx])  
-    [nil ctx]))
+(defn resolve-lexical [sym]
+  (fn [ctx]
+    (if-let [b (get (:lexicals ctx) sym)]
+      (let [ctx ((close-over b) ctx)]
+        [b ctx])  
+      [nil ctx])))
 
 #_(defn unify-loop [types]
   (fn updater [ctx]
@@ -280,22 +274,29 @@
 
 (defmethod analyze ::boolean
   [form]
-  (with-monad state-m
-    (m-result (with-meta [form] {::etype ::boolean}))))
+  (fn [ctx]
+    [(with-meta [form] {::etype ::boolean
+                        :position (:position ctx)})
+     ctx]))
 
 (defmethod analyze ::keyword
   [form]
   ;; register...
-  (with-monad state-m
-    (m-result (with-meta [form] {::etype ::keyword}))))
+  (fn [ctx]
+    [(with-meta [form] {::etype ::keyword
+                        :position (:position ctx)})
+     ctx]))
 
 (defmethod analyze ::symbol
   [sym]
-  (fn [ctx]
-    (let [[lex ctx] (resolve-lexical sym ctx)]
-      (if-not lex
-        ['var ctx]
-        ((make-binding-instance lex) ctx)))))
+  (domonad state-m
+    [lex (resolve-lexical sym)
+     pos (fetch-val :position)
+     bind (if lex
+            (make-binding-instance lex)
+            (m-result 'var))]
+    (with-meta bind {::etype ::local-binding
+                     :position pos})))
 
 (defmethod analyze [::special 'monitor-enter]
   [[_ lockee]]
@@ -304,7 +305,8 @@
      lockee (analyze lockee)
      _ (set-val :position pos)]
     (with-meta `(~'monitor-enter ~lockee)
-               {::etype ::monitor-enter})))
+               {::etype ::monitor-enter
+                :position pos})))
 
 (defmethod analyze [::special 'monitor-exit]
   [[_ lockee]]
@@ -313,7 +315,8 @@
      lockee (analyze lockee)
      _ (set-val :position pos)]
     (with-meta `(~'monitor-exit ~lockee)
-               {::etype ::monitor-exit})))
+               {::etype ::monitor-exit
+                :position pos})))
 
 (defmethod analyze ::invocation
   [[op & args :as form]]
@@ -325,7 +328,8 @@
      args (m-map analyze args)
      _ (set-val :position pos)]
     (with-meta `(~op ~@(doall args))
-               {::etype ::invocation})))
+               {::etype ::invocation
+                :position pos})))
 
 (defmethod analyze [::special 'set!]
   [[_ target value :as form]]
@@ -339,7 +343,8 @@
        _ (set-val :position pos)]
       (if (isa? (etype target) ::assignable)
         (with-meta `(~'set! ~target ~value)
-                   {::etype ::set!})
+                   {::etype ::set!
+                    :position pos})
         (throw (IllegalArgumentException. "Invalid assignment target"))))))
 
 (defmethod analyze [::special 'recur]
@@ -365,6 +370,7 @@
         [(with-meta analyzed-form
                     (merge (meta form)
                            {::etype ::recur
+                            :position position
                             ::loop-label loop-label
                             ::loop-locals loop-locals}))
          ctx]))))
@@ -385,7 +391,8 @@
        _ (set-val :position pos)
        tail (analyze (last body))]
       (with-meta `(~'do ~@(doall stmts) ~tail)
-                 {::etype ::do}))))
+                 {::etype ::do
+                  :position pos}))))
 
 (defmethod analyze [::special 'if]
   [[_ test-expr then else :as form]]
@@ -398,7 +405,8 @@
 
     :else
     (domonad state-m
-      [test-expr (analyze test-expr)
+      [pos (fetch-val :position) ; redundant?
+       test-expr (analyze test-expr)
        _ (push-clear-node :branch false)
        _ (push-clear-node :path false)
        then (analyze then)
@@ -409,7 +417,8 @@
        _ pop-frame]
       (with-meta `(if ~test-expr ~then ~else)
                  (merge (meta form)
-                        {::etype ::if})))))
+                        {::etype ::if
+                         :position pos})))))
 
 (declare analyze-loop)
 
@@ -443,6 +452,7 @@
   [bindings body loop?]
   (domonad state-m
     [_ (push-frame)
+     pos (fetch-val :position)
      bindings (m-map analyze-init (partition 2 bindings))
      _ (set-val :loop-locals (map first bindings))
      _ (if loop? (set-val :position :return) (m-result nil))
@@ -451,7 +461,8 @@
      _ (if loop? pop-frame (m-result nil))
      _ pop-frame]
     (with-meta `(~'let* ~bindings ~body)
-               {::etype (if loop? ::loop ::let)})))
+               {::etype (if loop? ::loop ::let)
+                :position pos})))
 
 (defn analyze-loop
   [[_ bindings & body :as form] loop?]
@@ -513,7 +524,8 @@
 (defmethod analyze [::special 'fn*]
   [[op & opts :as form]]
   (domonad state-m
-    [[op & meth :as norm] (normalize-fn* form)
+    [pos (fetch-val :position)
+     [op & meth :as norm] (normalize-fn* form)
      _ (push-object-frame (meta norm))
      meth (m-map analyze-method meth)
      f current-object
@@ -524,7 +536,6 @@
       (if (seq remain)
         (let [[info body :as m] (first remain)
               ar (arity info)]
-          (println "Arity" ar "method")
           (if (variadic? (:argv info))
             (if variadic
               (throw (Exception. "Can't have more than 1 variadic overload"))
@@ -544,9 +555,12 @@
             (throw (Exception. "Static fns can't be closures")))
           ;; compile & load
           ;; add metadata from original form
-          (assoc f
-                 :methods (filter identity a)
-                 :variadic-method variadic))))))
+          (with-meta
+            (assoc f
+                   :methods (filter identity a)
+                   :variadic-method variadic)
+            {::etype ::new-object
+             :position pos}))))))
 
 
 (defn process-fn*-args [argv static?]

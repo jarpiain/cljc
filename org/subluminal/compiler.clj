@@ -392,6 +392,8 @@
     [:invokeinterface ~[IFn 'invoke [:method Object (take (count args)
                                                           (repeat Object))]]]))
 
+;;;; Assignment
+
 (defmethod analyze [::special 'set!]
   [[_ target value :as form]]
   (if (not= (count form) 3)
@@ -436,6 +438,8 @@
                             ::loop-locals loop-locals}))
          ctx]))))
 
+;;;; Sequencing
+
 (defmethod analyze [::special 'do]
   [[_ & body]]
   (cond
@@ -454,6 +458,13 @@
       (with-meta `(~'do ~@(doall stmts) ~tail)
                  {::etype ::do
                   :position pos}))))
+
+(defmethod gen ::do
+  [[_ & body]]
+  (println "do" body)
+  (mapcat gen body))
+
+;;;; Conditional
 
 (defmethod analyze [::special 'if]
   [[_ test-expr then else :as form]]
@@ -480,6 +491,22 @@
                  (merge (meta form)
                         {::etype ::if
                          :position pos})))))
+
+(defmethod gen ::if
+  [[_ test-expr then else :as form]]
+  (let [[null falsel endl] (repeatedly 3 gensym)]
+    `(~@(gen test-expr)
+      [:dup]
+      [:ifnull ~null]
+      [:getstatic ~[Boolean 'FALSE Boolean]]
+      [:if-acmpeq ~falsel]
+      ~@(gen then)
+      [:goto ~endl]
+      [:label ~null]
+      [:pop]
+      [:label ~falsel]
+      ~@(gen else)
+      [:label ~endl])))
 
 (declare analyze-loop)
 

@@ -290,11 +290,14 @@
                        :position (:position ctx)})
      ctx]))
 
+(defn gen-nil [pos]
+  `([:aconst-null]
+    ~@(if (= pos :statement)
+        `([:pop]))))
+
 (defmethod gen ::null
   [form]
-  `([:aconst-null]
-    ~@(if (= (pos form) :statement)
-        `([:pop]))))
+  (gen-nil (pos form)))
 
 ;;;; boolean literals
 
@@ -332,6 +335,8 @@
     (with-meta bind {::etype ::local-binding
                      :position pos})))
 
+;;;; synchronization
+
 (defmethod analyze [::special 'monitor-enter]
   [[_ lockee]]
   (domonad state-m
@@ -351,6 +356,18 @@
     (with-meta `(~'monitor-exit ~lockee)
                {::etype ::monitor-exit
                 :position pos})))
+
+(defmethod gen ::monitor-enter
+  [[op lockee :as form]]
+  `(~@(gen lockee)
+    [:monitorenter]
+    ~@(gen-nil (pos form))))
+
+(defmethod gen ::monitor-exit
+  [[op lockee :as form]]
+  `(~@(gen lockee)
+    [:monitorexit]
+    ~@(gen-nil (pos form))))
 
 (defmethod analyze ::invocation
   [[op & args :as form]]

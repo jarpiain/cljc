@@ -281,6 +281,7 @@
       (nil? x) ::null
       (or (true? x) (false? x)) ::boolean
       (symbol? x) ::symbol
+      (number? x) ::number
       (string? x) ::string
       (keyword? x) ::keyword
       (and (coll? x) (empty? x)) ::empty
@@ -296,6 +297,9 @@
 
 (defmulti gen
   "Generate bytecode from an analyzed form"
+  etype :default ::invalid)
+
+(defmulti gen-unboxed
   etype :default ::invalid)
 
 (defmulti java-class etype)
@@ -391,6 +395,30 @@
             (m-result 'var))]
     (with-meta bind {::etype ::local-binding
                      :position pos})))
+
+;;;; Number
+
+(derive ::number ::constant)
+(defmethod analyze ::number
+  [x]
+  (if (or (instance? Long x)
+          (instance? Integer x)
+          (instance? Double x))
+    (fn [ctx]
+      (let [pos (:position ctx)]
+        [(with-meta [x]
+                    {::etype ::number
+                     :position pos})
+         ctx]))
+    (register-constant x)))
+
+(defmethod gen-unboxed ::number
+  [[x :as form]]
+  `([:ldc ~x]
+    ~@(when (instance? Integer x)
+        [[:i2l]])
+    ~@(when (= (pos form) :statement)
+        [[:pop]])))
 
 ;;;; Other constants
 

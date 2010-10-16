@@ -4,6 +4,7 @@
            (java.util IdentityHashMap)
            (clojure.lang LineNumberingPushbackReader
                          LazySeq IPersistentMap IObj
+                         RestFn AFunction
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
@@ -718,7 +719,8 @@
 
 ;;;; Closure
 
-(declare analyze-method)
+(declare analyze-method compile-class)
+(def *comclass* nil)
 
 (def +max-positional-arity+ 20)
 (defn arity [m]
@@ -758,12 +760,16 @@
             (throw (Exception. "Static fns can't be closures")))
           ;; compile & load
           ;; add metadata from original form
-          (with-meta
-            (assoc f
-                   :methods (filter identity a)
-                   :variadic-method variadic)
-            {::etype ::fn
-             :position pos}))))))
+          (let [obj (with-meta
+                      (assoc f
+                             :methods (filter identity a)
+                             :variadic-method variadic)
+                      {::etype ::fn
+                       :position pos})
+                bytecode (compile-class obj (if variadic RestFn AFunction) [])]
+            (def *comclass* (conj *comclass* (bin/read-binary ::asm/ClassFile
+                                             (bin/buffer-wrap bytecode))))
+            obj))))))
 
 (defmethod gen ::fn
   [form]
@@ -1040,6 +1046,7 @@
 
 (defn emit-constants [& more])
 (defn emit-methods [& more])
+(defn write-class-file [& more])
 
 (defn compile-class
   [obj super ifaces]
@@ -1052,6 +1059,7 @@
         (asm/add-field c {:name fld
                           :descriptor cls
                           :flags #{:public :final :static}})))
+
     (let [clinit (asm/add-method c {:name '<clinit>
                                     :descriptor [:method :void []]
                                     :flags #{:public :static}})]
@@ -1060,49 +1068,54 @@
       (asm/assemble-method clinit))
 
     (doseq [[sym bind] (:closed-lexicals obj)]
-      (let [{:keys [java-class]} bind]
+      (let [{:keys [java-type]} bind]
+        (println "Adding field" sym java-type bind)
         (asm/add-field c {:name sym
-                          :descriptor java-class
+                          :descriptor java-type
                           :flags #{:public :final}})))
 
     (let [clos (:closed-lexicals obj)
           clos-names (keys clos)
           clos-types (map :java-type (vals clos))]
+      (println "Names" clos-names "Types" clos-types)
       (let [init (asm/add-method c {:name '<init>
                                     :descriptor [:method :void clos-types]
-                                    :params (cons 'this clos-names)
+                                    :params clos-names
                                     :flags #{:public}})]
         (asm/emit c init
           `([:aload-0]
             [:invokespecial ~[super '<init> [:method :void []]]]
-            ~@(map (fn [arg typ]
-                     `([:aload-0]
-                       [:aload ~arg]
-                       [:putfield [~obj ~arg ~typ]]))
-                   clos-names clos-types)
+            ~@(mapcat (fn [arg typ]
+                        (println "Aload" arg)
+                        `([:aload-0]
+                          [:aload ~arg]
+                          [:putfield [~(:name obj) ~arg ~typ]]))
+                      clos-names clos-types)
             [:return]))
         (asm/assemble-method init)))
 
-
-    (let [meta asm/add-method c {:name 'meta
-                                 :descriptor [:method IPersistentMap []]
-                                 :flags #{:public}}]
+    (let [meta (asm/add-method c {:name 'meta
+                                  :descriptor [:method IPersistentMap []]
+                                  :flags #{:public}})]
       (asm/emit c meta
         `([:aconst-null]
-            [:areturn])))
+          [:areturn]))
+      (asm/assemble-method meta))
 
-    (let [with-meta asm/add-method c {:name 'with-meta
-                                        :descriptor
-                                        [:method IObj [IPersistentMap]]
-                                        :flags #{:public}}]
-        (asm/emit c with-meta
-          `([:aload-0]
-            [:areturn])))
+    (let [with-meta (asm/add-method c {:name 'with-meta
+                                       :descriptor
+                                         [:method IObj [IPersistentMap]]
+                                       :flags #{:public}})]
+      (asm/emit c with-meta
+        `([:aload-0]
+          [:areturn]))
+      (asm/assemble-method with-meta))
+
 
     (emit-methods obj c)
     (asm/assemble-class c)
 
-    (let [bytecode (ByteBuffer/alloc 100000)] ;[(((asm/class-size c))]
+    (let [bytecode (ByteBuffer/allocate 100000)] 
       (bin/write-binary ::asm/ClassFile bytecode c)
       (let [bytecode (.array bytecode)]
         (when *compile-files*

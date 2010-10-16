@@ -1636,7 +1636,7 @@
   values to local variable and constant pool indices.
   Called on first pass of the assembler."
   [atyp asym locals]
-;  (with-monad state-m
+;  (with-monad state-m)
     (case atyp
       ::local-var (with-monad state-m (m-result (locals asym)))
       ::pool-class (class-to-pool asym)

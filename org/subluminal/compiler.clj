@@ -358,6 +358,17 @@
     (with-meta bind {::etype ::local-binding
                      :position pos})))
 
+(defn load-op [jt]
+  :aload)
+
+(defmethod gen ::local-binding
+  [b]
+  (let [pos (pos b)
+        jt (:java-type b)]
+    (if (= (:kind b) :closed)
+      `([:getfield ~[:thisfn (:label b) jt]])
+      `(~[(load-op jt) (:label b)]))))
+
 ;;;; synchronization
 
 (defmethod analyze [::special 'monitor-enter]
@@ -626,6 +637,8 @@
                   ;; name of generated class
                   :name (symbol (str base-name simple-name))})))))
 
+;;;; Closure
+
 (declare analyze-method)
 
 (def +max-positional-arity+ 20)
@@ -670,9 +683,20 @@
             (assoc f
                    :methods (filter identity a)
                    :variadic-method variadic)
-            {::etype ::new-object
+            {::etype ::fn
              :position pos}))))))
 
+(defmethod gen ::fn
+  [form]
+  (let [pos (pos form)
+        clos (:closed-lexicals form)]
+    `([:new ~(:name form)]
+      ~@(concat
+          (for [[btag b] clos]
+            (gen b)))
+      [:invokespecial ~[(:name form) '<init>
+                        [:method :void (map :java-type (vals clos))]]]
+      ~@(when (= pos :statement) [[:pop]]))))
 
 (defn process-fn*-args [argv static?]
   (loop [req-params [] rest-param nil state :req remain argv]
@@ -777,8 +801,6 @@
 ;; tags a form with ::etype
 ;; (maybe also ::can-emit-primitive? ::java-class)
 
-(defmulti literal-val etype)
-
 (defmethod literal-val :default
   [form]
   (throw (IllegalArgumentException. (str "Not a literal form: " form))))
@@ -870,18 +892,6 @@
                 :else form))))))))
 
 ;;;; bytecode generation (gen unboxed-gen)
-
-;;;; nil literal
-
-(defmethod literal-val ::null
-  [form]
-  nil)
-
-;;;; boolean literal
-
-(defmethod literal-val Boolean
-  [form]
-  form)
 
 ;;;; String literal
 

@@ -1,11 +1,12 @@
 (ns org.subluminal.compiler
   (:import (java.io Reader)
+           (java.nio ByteBuffer)
            (java.util IdentityHashMap)
            (clojure.lang LineNumberingPushbackReader
-                         LazySeq
+                         LazySeq IPersistentMap IObj
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads))
-  (:require (org.subluminal [class-file :as asm])))
+  (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
 
 (defstruct context
@@ -1036,6 +1037,77 @@
 (defn gen-unboxed ::do
   [[_ & body] ctx]
   (gen-body body ctx true))
+
+(defn emit-constants [& more])
+(defn emit-methods [& more])
+
+(defn compile-class
+  [obj super ifaces]
+  (asm/assembling [c {:name (:name obj)
+                      :extends super
+                      :implements ifaces
+                      :flags #{:public :super :final}}]
+    (doseq [fld (:constants obj)]
+      (let [{:keys [cls]} (meta fld)]
+        (asm/add-field c {:name fld
+                          :descriptor cls
+                          :flags #{:public :final :static}})))
+    (let [clinit (asm/add-method c {:name '<clinit>
+                                    :descriptor [:method :void []]
+                                    :flags #{:public :static}})]
+      (emit-constants c clinit)
+      (asm/emit1 c clinit [:return])
+      (asm/assemble-method clinit))
+
+    (doseq [[sym bind] (:closed-lexicals obj)]
+      (let [{:keys [java-class]} bind]
+        (asm/add-field c {:name sym
+                          :descriptor java-class
+                          :flags #{:public :final}})))
+
+    (let [clos (:closed-lexicals obj)
+          clos-names (keys clos)
+          clos-types (map :java-type (vals clos))]
+      (let [init (asm/add-method c {:name '<init>
+                                    :descriptor [:method :void clos-types]
+                                    :params (cons 'this clos-names)
+                                    :flags #{:public}})]
+        (asm/emit c init
+          `([:aload-0]
+            [:invokespecial ~[super '<init> [:method :void []]]]
+            ~@(map (fn [arg typ]
+                     `([:aload-0]
+                       [:aload ~arg]
+                       [:putfield [~obj ~arg ~typ]]))
+                   clos-names clos-types)
+            [:return]))
+        (asm/assemble-method init)))
+
+
+    (let [meta asm/add-method c {:name 'meta
+                                 :descriptor [:method IPersistentMap []]
+                                 :flags #{:public}}]
+      (asm/emit c meta
+        `([:aconst-null]
+            [:areturn])))
+
+    (let [with-meta asm/add-method c {:name 'with-meta
+                                        :descriptor
+                                        [:method IObj [IPersistentMap]]
+                                        :flags #{:public}}]
+        (asm/emit c with-meta
+          `([:aload-0]
+            [:areturn])))
+
+    (emit-methods obj c)
+    (asm/assemble-class c)
+
+    (let [bytecode (ByteBuffer/alloc 100000)] ;[(((asm/class-size c))]
+      (bin/write-binary ::asm/ClassFile bytecode c)
+      (let [bytecode (.array bytecode)]
+        (when *compile-files*
+          (write-class-file obj bytecode))
+        bytecode))))
 
 ;;;; toplevel
 

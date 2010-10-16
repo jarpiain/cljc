@@ -1,7 +1,5 @@
 (in-ns 'org.subluminal.compiler)
 
-(load "cljc/util")
-
 (defn namespace-for
   ([sym] (namespace-for *ns* sym))
   ([inns sym]

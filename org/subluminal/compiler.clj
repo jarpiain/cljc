@@ -9,6 +9,8 @@
   (:use (clojure.contrib monads))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
+(def gen nil)
+(def analyze nil)
 
 (defstruct context
            :position    ; :eval :statement :expression :return
@@ -162,7 +164,6 @@
   ([sym jtype] (make-binding sym jtype :local))
   ([sym jtype kind]
    (fn [ctx]
-     ;(println "binding" sym kind "in m-tag" (:method ctx))
      (let [b {:symbol sym
               :label (gensym "BB")
               :kind kind
@@ -175,8 +176,6 @@
 
 (defn clear-path [b]
   (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
-    ;(println "clear-path" (:symbol b)
-    ;         (map (juxt :clear-tag :clear-kind) p))
     p))
 
 (defn join-point [b1 b2]
@@ -184,7 +183,6 @@
     (cond
       (not= (:clear-tag (first p1)) (:clear-tag (first p2)))
       nil
-      ;(do (println "early out") nil)
 
       (or (nil? (second p1)) (not= (:clear-tag (second p1))
                                    (:clear-tag(second p2))))
@@ -228,32 +226,34 @@
     Object))
 
 (defn valid-binding? [b ctx]
-  ;(println "Checking" (:kind b) (:symbol b) "tagged"
-  ;         (:method-tag b)
-  ;         "from" (:method ctx))
   (and
     (= (:fn-tag b) (:fn ctx))))
-;    (= (:method-tag b) (:method-tag (:method ctx)))))
 
 (defn close-over [b]
   (fn updater [ctx]
-    (loop [obj (:fn ctx) ctx ctx]
+    (loop [obj (:fn ctx) ctx2 ctx same true]
       (assert obj)
       (if (= obj (:fn-tag b))
-        ctx
+        (if same
+          [b ctx2] 
+          [(assoc b :kind :closed
+                    :place (:name (first (current-object ctx))))             
+           ctx2])
         (recur (->> obj
-                 (get (:index ctx))
+                 (get (:index ctx2))
                  :enclosing-method
-                 (get (:index ctx))
+                 (get (:index ctx2))
                  :containing-object)
-               (update-in ctx [:index obj :closed-lexicals]
-                          assoc (:label b) b))))))
+               (update-in ctx2 [:index obj :closed-lexicals]
+                          assoc (:label b)
+                          (assoc b :kind :closed
+                                 :place (:name (get :index ctx2) obj)))
+               false)))))
 
 (defn resolve-lexical [sym]
   (fn [ctx]
     (if-let [b (get (:lexicals ctx) sym)]
-      (let [ctx ((close-over b) ctx)]
-        [b ctx])  
+      ((close-over b) ctx)
       [nil ctx])))
 
 #_(defn unify-loop [types]
@@ -268,7 +268,7 @@
                :parent parent
                :loop-locals (:loop-locals parent))))))
 
-(load "cljc/util")
+;(load "cljc/util")
 
 (defn etype [x]
   (::etype (meta x)))
@@ -395,8 +395,9 @@
      bind (if lex
             (make-binding-instance lex)
             (m-result 'var))]
-    (with-meta bind {::etype ::local-binding
-                     :position pos})))
+    (with-meta bind (merge (meta bind)
+                           {::etype ::local-binding
+                            :position pos}))))
 
 ;;;; Number
 
@@ -445,9 +446,12 @@
   [b]
   (let [pos (pos b)
         jt (:java-type b)]
-    (if (= (:kind b) :closed)
-      `([:getfield ~[:thisfn (:label b) jt]])
-      `(~[(load-op jt) (:label b)]))))
+    `(~(if (= (:kind b) :closed)
+         [:getfield [(:place b) (:label b) jt]]
+         [(load-op jt) (:label b)])
+      ~@(when (= pos :statement)
+          [[:pop]]))))
+
 
 ;;;; synchronization
 
@@ -575,7 +579,6 @@
 
 (defmethod gen ::do
   [[_ & body]]
-  (println "do" body)
   (mapcat gen body))
 
 ;;;; Conditional
@@ -721,6 +724,8 @@
 
 (declare analyze-method compile-class)
 (def *comclass* nil)
+(defn variadic? [argv]
+  (not (nil? (:rest-param argv))))
 
 (def +max-positional-arity+ 20)
 (defn arity [m]
@@ -734,7 +739,8 @@
      _ (push-object-frame (meta norm))
      meth (m-map analyze-method meth)
      f current-object
-     _ pop-frame]
+     _ pop-frame
+     initargs (m-map resolve-lexical (map :symbol (vals (:closed-lexicals f))))]
     (loop [a (vec (repeat (inc +max-positional-arity+) nil))
            variadic nil
            remain meth]
@@ -769,19 +775,21 @@
                 bytecode (compile-class obj (if variadic RestFn AFunction) [])]
             (def *comclass* (conj *comclass* (bin/read-binary ::asm/ClassFile
                                              (bin/buffer-wrap bytecode))))
-            obj))))))
+            (with-meta [(:name obj) initargs]
+                       {::etype ::fn
+                        :position pos})))))))
 
 (defmethod gen ::fn
-  [form]
-  (let [pos (pos form)
-        clos (:closed-lexicals form)]
-    `([:new ~(:name form)]
-      ~@(concat
-          (for [[btag b] clos]
-            (gen b)))
-      [:invokespecial ~[(:name form) '<init>
-                        [:method :void (map :java-type (vals clos))]]]
+  [[nam initargs :as form]]
+  (let [pos (pos form)]
+    `([:new ~nam]
+      ~@(apply concat
+          (for [b initargs]
+            (gen (with-meta b {::etype ::local-binding :position :expression}))))
+      [:invokespecial ~[nam '<init>
+                        [:method :void (map :java-type initargs)]]]
       ~@(when (= pos :statement) [[:pop]]))))
+
 
 (defn process-fn*-args [argv static?]
   (loop [req-params [] rest-param nil state :req remain argv]
@@ -827,8 +835,6 @@
                      state)
                    (next remain))))))))
 
-(defn variadic? [argv]
-  (not (nil? (:rest-param argv))))
 
 (defn update-current-method [f & args]
   (fn [ctx]
@@ -885,7 +891,7 @@
 ;;;; Analyze
 ;; tags a form with ::etype
 ;; (maybe also ::can-emit-primitive? ::java-class)
-
+(comment
 (defmethod literal-val :default
   [form]
   (throw (IllegalArgumentException. (str "Not a literal form: " form))))
@@ -1043,9 +1049,25 @@
 (defn gen-unboxed ::do
   [[_ & body] ctx]
   (gen-body body ctx true))
-
+)
 (defn emit-constants [& more])
-(defn emit-methods [& more])
+
+;; TODO: defmulti --> deftypes also
+(defn emit-methods [obj cref]
+  (doseq [[info body :as mm] (:methods obj)]
+    (let [{:keys [argv bind this loop-label]} info] 
+      (let [mref (asm/add-method cref
+                   {:name 'invoke
+                    :descriptor [:method Object
+                                 (repeat (count bind) Object)]
+                    :params (map :label bind)
+                    :flags #{:public}
+                    :throws [Exception]})]
+        (asm/emit1 cref mref [:label loop-label])
+        (asm/emit cref mref (gen body))
+        (asm/emit1 cref mref [:areturn])
+        (asm/assemble-method mref)))))
+
 (defn write-class-file [& more])
 
 (defn compile-class
@@ -1069,7 +1091,6 @@
 
     (doseq [[sym bind] (:closed-lexicals obj)]
       (let [{:keys [java-type]} bind]
-        (println "Adding field" sym java-type bind)
         (asm/add-field c {:name sym
                           :descriptor java-type
                           :flags #{:public :final}})))
@@ -1077,7 +1098,6 @@
     (let [clos (:closed-lexicals obj)
           clos-names (keys clos)
           clos-types (map :java-type (vals clos))]
-      (println "Names" clos-names "Types" clos-types)
       (let [init (asm/add-method c {:name '<init>
                                     :descriptor [:method :void clos-types]
                                     :params clos-names
@@ -1086,7 +1106,6 @@
           `([:aload-0]
             [:invokespecial ~[super '<init> [:method :void []]]]
             ~@(mapcat (fn [arg typ]
-                        (println "Aload" arg)
                         `([:aload-0]
                           [:aload ~arg]
                           [:putfield [~(:name obj) ~arg ~typ]]))
@@ -1115,7 +1134,7 @@
     (emit-methods obj c)
     (asm/assemble-class c)
 
-    (let [bytecode (ByteBuffer/allocate 100000)] 
+    (let [bytecode (ByteBuffer/allocate 1000)] 
       (bin/write-binary ::asm/ClassFile bytecode c)
       (let [bytecode (.array bytecode)]
         (when *compile-files*
@@ -1126,9 +1145,8 @@
 
 ;; A constant is
 ;; ^{::etype ::constant} {:type foo :val v}
-
-(defn compile
-  [rd src-path src-name]
+(comment
+  ([rd src-path src-name]
   (binding [*source-path* src-path
             *source-file* src-name
             *method* nil
@@ -1214,4 +1232,4 @@
       (let [tagged (analyze form :eval)
             bytecode (gen tagged :expression)]
         (eval-impl tagged)
-        bytecode))))
+        bytecode)))))

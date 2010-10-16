@@ -1888,12 +1888,12 @@
 
 ; (label foo)
 (defn label? [ins]
-  (= (first ins) 'label))
+  (= (first ins) :label))
 
 ; (block start end [var type...]
 ;   body)
 (defn block? [ins]
-  (= (first ins) 'block))
+  (= (first ins) :block))
 
 (defn emit1
   "Add an instruction, block, or label into the instruction stream"
@@ -1914,7 +1914,7 @@
 
      (= (first item) 'do)
      (let [body (rest item)]
-       (emit cref mref (apply vector
+       (emit1 cref mref (apply vector
                               'block nil nil []
                               body)))
 
@@ -1937,13 +1937,13 @@
      (let [[_ beg end vars & items] item]
        (dosync
          ;; Todo: generate LocalVarTable entries
-         (when beg (emit cref mref ['label beg]))
+         (when beg (emit1 cref mref ['label beg]))
          (let [subctx (merge-locals ctx vars)]
            (alter mref update-in [:attributes 0 :max-locals]
                   (partial max (:size subctx)))
            (doseq [i items]
-             (emit cref mref subctx i)))
-         (when end (emit cref mref ['label end]))))
+             (emit1 cref mref subctx i)))
+         (when end (emit1 cref mref ['label end]))))
 
      :else
      (let [[op & args] item]

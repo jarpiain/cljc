@@ -6,9 +6,9 @@
   ([sym] (namespace-for *ns* sym))
   ([inns sym]
    (let [nssym (symbol (namespace sym))
-         ns (or (get (ns-aliases inns) nssym)
-                (find-ns nssym))]
-     ns)))
+         n (or (get (ns-aliases inns) nssym)
+               (find-ns nssym))]
+     n)))
 
 (defn- lookup-var0 [sym intern?]
   (cond
@@ -41,8 +41,9 @@
 
 (defn lookup-var [sym intern?]
   (let [v (lookup-var0 sym intern?)]
-;    (when v (register-var v))
-    v))
+    (if v
+      (register-var v)
+      (m-result v))))
 
 #_(defn close-over [binding method]
   (when (and binding method

@@ -50,6 +50,33 @@
                     :index (assoc (:index ctx) tag
                                   (assoc f :enclosing-method enc)))]))))
 
+(defn register-constant [obj]
+  (fn [ctx]
+    (let [curr-obj (get (:index ctx) (:fn ctx))]
+      (if-let [c (get (:constant-ids curr-obj) obj)]
+        [c ctx]
+        (let [c (with-meta (gensym "const__")
+                           {::etype ::constant
+                            :position (:position ctx)
+                            :cls (class obj)
+                            :obj (:name curr-obj)})
+              curr-obj (update-in curr-obj [:constants] conj c)]
+          (.put (:constant-ids curr-obj) obj c)
+          [c (assoc-in ctx [:index (:fn ctx)] curr-obj)])))))
+
+(defn register-keyword [kw]
+  (fn [ctx]
+    (let [curr-obj (get (:index ctx) (:fn ctx))]
+      (if-let [prev (get (:keywords curr-obj) kw)]
+        [prev ctx]
+        (let [[c ctx] ((register-constant kw) ctx)
+              k (with-meta c
+                           (merge (meta c)
+                                  {::etype ::keyword
+                                   :keyword kw}))]
+          [k (update-in ctx [:index (:fn ctx) :keywords]
+                        assoc k kw)])))))
+
 (defn push-method-frame [m]
   (let [tag (gensym "MT__")
         ct (gensym "CN__")
@@ -276,7 +303,15 @@
 
 (defn tea "Test analysis"
   ([form] (tea form :expression))
-  ([form pos] (first ((analyze form) (assoc null-context :position pos)))))
+  ([form pos]
+   (let [[res ctx]
+         ((domonad state-m
+            [_ (push-object-frame {:name 'toplevel})
+             _ (set-val :position pos)
+             a (analyze form)
+             _ pop-frame]
+            a) null-context)]
+     res)))
 (defn teg "Test gen"
   ([form] (gen (tea form)))
   ([form pos] (gen (tea form pos))))
@@ -339,13 +374,12 @@
   [[form]]
   form)
 
+;;;; Keyword
+
+(derive ::keyword ::constant)
 (defmethod analyze ::keyword
-  [form]
-  ;; register...
-  (fn [ctx]
-    [(with-meta [form] {::etype ::keyword
-                        :position (:position ctx)})
-     ctx]))
+  [kw]
+  (register-keyword kw))
 
 (defmethod analyze ::symbol
   [sym]
@@ -358,8 +392,24 @@
     (with-meta bind {::etype ::local-binding
                      :position pos})))
 
+;;;; Other constants
+
+(defmethod analyze ::constant
+  [obj]
+  (register-constant obj))
+
+(defmethod gen ::constant
+  [sym]
+  (let [{:keys [position obj cls]} (meta sym)]
+    `([:getstatic [~obj ~sym ~cls]]
+      ~@(when (= position :statement)
+          [[:pop]]))))
+
 (defn load-op [jt]
   :aload)
+
+(defn return-op [jt]
+  :areturn)
 
 (defmethod gen ::local-binding
   [b]
@@ -528,7 +578,7 @@
 
 (defmethod gen ::if
   [[_ test-expr then else :as form]]
-  (let [[null falsel endl] (repeatedly 3 gensym)]
+  (let [[null falsel endl] (map gensym ["Null__" "False__" "End__"])]
     `(~@(gen test-expr)
       [:dup]
       [:ifnull ~null]

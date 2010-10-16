@@ -1051,6 +1051,7 @@
 
 (defn normalized-clazz? [cls]
   (or (symbol? cls)  ; class or iface
+      (string? cls)  ; class name
       (keyword? cls) ; primitive
       (and (sequential? cls)
            (= (first cls) :array)
@@ -1076,6 +1077,9 @@
 
     (and (sequential? desc) (= (first desc) :array))
     [:array (normalize-type-specifier (second desc))]
+
+    (string? desc)
+    (symbol desc)
 
     :else
     desc))
@@ -1854,7 +1858,7 @@
         ins
         ))))
 
-(defn emit1
+(defn emit-instr
   "Add one instruction to the code buffer converting symbolic
   constants to constant pool indices"
   [cref mref instr ctx]
@@ -1891,9 +1895,9 @@
 (defn block? [ins]
   (= (first ins) 'block))
 
-(defn emit
+(defn emit1
   "Add an instruction, block, or label into the instruction stream"
-  ([cref mref item] (emit cref mref (get-in @mref [:attributes 0 :ctx]) item))
+  ([cref mref item] (emit1 cref mref (get-in @mref [:attributes 0 :ctx]) item))
   ([cref mref ctx item]
    (cond
      ;; Todo: LineNumberTable items [:line 128]
@@ -1943,7 +1947,11 @@
 
      :else
      (let [[op & args] item]
-       (emit1 cref mref (struct instruction op args nil) (:vars ctx))))))
+       (emit-instr cref mref (struct instruction op args nil) (:vars ctx))))))
+
+(defn emit [cref mref items]
+  (doseq [item items]
+    (emit1 cref mref item)))
 
 ;;;; Second pass of the assembler
 ;; Calculate exact offset of each instruction and label;
@@ -2329,10 +2337,10 @@
   [ins labels len]
   (let [bytecode (byte-array len)]
     (let [^ByteBuffer buf (ByteBuffer/wrap bytecode)]
-      (doseq [[offs instr] ins]
+      (doseq [[offs instr] ins] 
         (asm1 buf instr labels)))
     bytecode))
-
+;[offs instr]
 ;;;; Top-level interface
 
 (defn get-or-die [map val]

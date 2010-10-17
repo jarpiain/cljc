@@ -62,11 +62,11 @@
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [c (get (:constant-ids curr-obj) obj)]
         [c ctx]
-        (let [c (with-meta (gensym "const__")
-                           {::etype ::constant
-                            :position (:position ctx)
-                            :cls (class obj)
-                            :obj (:name curr-obj)})
+        (let [c {::etype ::constant
+                 :position (:position ctx)
+                 :val (gensym "const__")
+                 :java-type (class obj)
+                 :obj (:name curr-obj)}
               curr-obj (update-in curr-obj [:constants] conj c)]
           (.put (:constant-ids curr-obj) obj c)
           [c (assoc-in ctx [:index (:fn ctx)] curr-obj)])))))
@@ -77,10 +77,8 @@
       (if-let [prev (get (:keywords curr-obj) kw)]
         [prev ctx]
         (let [[c ctx] ((register-constant kw) ctx)
-              k (with-meta c
-                           (merge (meta c)
-                                  {::etype ::keyword
-                                   :keyword kw}))]
+              k (merge c
+                       {::etype ::keyword})]
           [k (update-in ctx [:index (:fn ctx) :keywords]
                         assoc k kw)])))))
 
@@ -166,16 +164,17 @@
 (defn make-binding
   ([sym jtype] (make-binding sym jtype :local))
   ([sym jtype kind]
-   (fn [ctx]
-     (let [b {:symbol sym
-              :label (gensym "BB")
-              :kind kind
-              :method-tag (:method ctx)
-              :fn-tag (:fn ctx)
-              :java-type jtype
-              :clear-root (:clear-root ctx)}]
-       [b (update-in ctx [:lexicals]
-                     assoc sym b)]))))
+   (let [jtype (if jtype jtype Object)]
+     (fn [ctx]
+       (let [b {:symbol sym
+                :label (gensym "BB")
+                :kind kind
+                :method-tag (:method ctx)
+                :fn-tag (:fn ctx)
+                :java-type jtype
+                :clear-root (:clear-root ctx)}]
+         [b (update-in ctx [:lexicals]
+                       assoc sym b)])))))
 
 (defn clear-path [b]
   (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
@@ -279,6 +278,7 @@
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
   [x]
+  (println "syncat of" x)
   (let [x (if (instance? LazySeq x)
             (if-let [sx (seq x)] sx ())
             x)]
@@ -302,13 +302,35 @@
 
 (defmulti gen
   "Generate bytecode from an analyzed form"
-  etype :default ::invalid)
+  ::etype :default ::invalid)
 
 (defmulti gen-unboxed
   etype :default ::invalid)
 
-(defmulti java-class etype)
-(defmulti literal-val etype)
+(defmulti java-class ::etype)
+(defmulti literal-val ::etype)
+
+;; nil represents the null type (assignable to all reference types)
+(defn has-java-class? [f]
+  (not= (:java-type f) Void/TYPE))
+
+(defn is-primitive? [^Class c]
+  (and c (.isPrimitive c) (not= c Void/TYPE)))
+
+(defn can-emit-unboxed? [f]
+  (let [^Class c (:java-type f)]
+    (and c (.isPrimitive c) (not= c Void/TYPE))))
+
+(defn local-type [hinted inferred]
+  (cond
+    (and (nil? hinted) (nil? inferred)) Object
+
+    (is-primitive? inferred)
+    (if hinted
+      (throw (Exception. "Can't type hint a local with a primitive initializer"))
+      inferred)
+
+    :else hinted))
 
 (defn tea "Test analysis"
   ([form] (tea form :expression))
@@ -325,8 +347,6 @@
   ([form] (gen (tea form)))
   ([form pos] (gen (tea form pos))))
 
-(defn pos [form] (:position (meta form)))
-
 (defmethod gen ::invalid
   [form]
   (throw (IllegalArgumentException.
@@ -337,20 +357,21 @@
 (defmethod analyze ::null
   [form]
   (fn [ctx]
-    [(with-meta [nil] {::etype ::null
-                       :position (:position ctx)})
+    [{::etype ::null
+      :java-type nil
+      :position (:position ctx)}
      ctx]))
 
-(defn gen-nil [pos]
-  `([:aconst-null]
-    ~@(if (= pos :statement)
-        `([:pop]))))
+(defn maybe-pop [pos]
+  (when (= pos :statement)
+    [[:pop]]))
 
 (defmethod gen ::null
   [form]
-  (gen-nil (pos form)))
+  `([:aconst-null]
+    ~@(maybe-pop (:position form))))
 
-(defmethod java-class ::null
+#_(defmethod java-class ::null
   [_]
   nil)
 
@@ -362,18 +383,26 @@
 
 (defmethod analyze ::boolean
   [form]
-  (fn [ctx]
-    [(with-meta [form] {::etype ::boolean
-                        :position (:position ctx)})
+  (fn [{:keys [want-unboxed] :as ctx}]
+    [{::etype ::boolean
+      :val form
+      :java-type (if (= want-unboxed Boolean/TYPE)
+                   Boolean/TYPE
+                   Boolean)
+      :position (:position ctx)}
      ctx]))
 
 (defmethod gen ::boolean
-  [[bool :as form]]
-  `(~(if bool
-       [:getstatic [Boolean 'TRUE Boolean]]
-       [:getstatic [Boolean 'FALSE Boolean]])
-    ~@(if (= (pos form) :statement)
-        `([:pop]))))
+  [{:keys [val position] :as form}]
+  (if (can-emit-unboxed? form)
+    `(~(if val
+         [:iconst-1]
+         [:iconst-0])
+      ~@(maybe-pop position))
+    `(~(if val
+         [:getstatic [Boolean 'TRUE Boolean]]
+         [:getstatic [Boolean 'FALSE Boolean]])
+      ~@(maybe-pop position))))
 
 (defmethod java-class ::boolean
   [_]
@@ -393,16 +422,25 @@
 (defmethod analyze ::symbol
   [sym]
   (run
-    [lex (resolve-lexical sym)
+    [unbox-type (fetch-val :want-unboxed)
+     lex (resolve-lexical sym)
      pos (fetch-val :position)
      bind (if lex
             (make-binding-instance lex)
             (m-result 'var))]
-    (with-meta bind (merge (meta bind)
-                           {::etype ::local-binding
-                            :position pos}))))
+    (let [btype (:java-type bind)
+          res (assoc bind ::etype ::local-binding :position pos)]
+      (if (and (is-primitive? btype) (not= btype unbox-type))
+        (assoc res :java-type Number :unbox-type btype)
+        res))))
 
 ;;;; Number
+
+(defn unboxed-type [^Class c]
+  (cond 
+    (= c Long) Long/TYPE
+    (= c Integer) Long/TYPE
+    (= c Double) Double/TYPE))
 
 (derive ::number ::constant)
 (defmethod analyze ::number
@@ -411,20 +449,21 @@
           (instance? Integer x)
           (instance? Double x))
     (fn [ctx]
-      (let [pos (:position ctx)]
-        [(with-meta [x]
-                    {::etype ::number
-                     :position pos})
-         ctx]))
+      (let [pos (:position ctx)
+            jt (:want-unboxed ctx)]
+        (if (or (= jt (unboxed-type (class x)))
+                (true? jt))
+          [{::etype ::number
+            :java-type (unboxed-type (class x))
+            :position pos
+            :val x} ctx]
+          ((register-constant x) ctx))))
     (register-constant x)))
 
-(defmethod gen-unboxed ::number
-  [[x :as form]]
-  `([:ldc ~x]
-    ~@(when (instance? Integer x)
-        [[:i2l]])
-    ~@(when (= (pos form) :statement)
-        [[:pop]])))
+(defmethod gen ::number
+  [{:keys [position val]}]
+  `([:ldc ~val]
+    ~@(maybe-pop position)))
 
 ;;;; Other constants
 
@@ -433,28 +472,40 @@
   (register-constant obj))
 
 (defmethod gen ::constant
-  [sym]
-  (let [{:keys [position obj cls]} (meta sym)]
-    `([:getstatic [~obj ~sym ~cls]]
-      ~@(when (= position :statement)
-          [[:pop]]))))
+  [{:keys [position val obj java-type]}]
+  `([:getstatic [~obj ~val ~java-type]]
+    ~@(maybe-pop position)))
 
 (defn load-op [jt]
-  :aload)
+  (cond
+    (= jt Long/TYPE) :lload
+    (= jt Double/TYPE) :dload
+    :else :aload))
+
+(defn store-op [jt]
+  (cond
+    (= jt Long/TYPE) :lstore
+    (= jt Double/TYPE) :dstore
+    :else :astore))
 
 (defn return-op [jt]
-  :areturn)
+  (cond
+    (= jt Long/TYPE) :lreturn
+    (= jt Double/TYPE) :dreturn
+    :else :areturn))
 
 (defmethod gen ::local-binding
-  [b]
-  (let [pos (pos b)
-        jt (:java-type b)]
-    `(~(if (= (:kind b) :closed)
-         [:getfield [(:place b) (:label b) jt]]
-         [(load-op jt) (:label b)])
-      ~@(when (= pos :statement)
-          [[:pop]]))))
-
+  [{:keys [kind position java-type unbox-type place label]}]
+  `(~(if (= kind :closed)
+       [:getfield [place label java-type]]
+       [(load-op java-type) label])
+    ~@(when (and unbox-type (not (is-primitive? java-type)))
+        (condp = unbox-type
+          Long/TYPE
+          `([:invokestatic ~[Long 'valueOf [:method Long [:long]]]])
+          Double/TYPE
+          `([:invokestatic ~[Double 'valueOf [:method Double [:double]]]])))
+    ~@(maybe-pop position)))
 
 ;;;; synchronization
 
@@ -462,33 +513,39 @@
   [[_ lockee]]
   (run
     [pos (set-val :position :expression)
+     jt (set-val :want-unboxed nil)
      lockee (analyze lockee)
      _ (set-val :position pos)]
-    (with-meta `(~'monitor-enter ~lockee)
-               {::etype ::monitor-enter
-                :position pos})))
+    {::etype ::monitor-enter
+     :lock lockee
+     :java-type Void/TYPE
+     :position pos}))
 
 (defmethod analyze [::special 'monitor-exit]
   [[_ lockee]]
   (run
     [pos (set-val :position :expression)
+     jt (set-val :want-unboxed nil)
      lockee (analyze lockee)
      _ (set-val :position pos)]
-    (with-meta `(~'monitor-exit ~lockee)
-               {::etype ::monitor-exit
-                :position pos})))
+    {::etype ::monitor-exit
+     :lock lockee
+     :java-type Void/TYPE
+     :position pos}))
 
 (defmethod gen ::monitor-enter
-  [[op lockee :as form]]
-  `(~@(gen lockee)
+  [{:keys [lock position]}]
+  `(~@(gen lock)
     [:monitorenter]
-    ~@(gen-nil (pos form))))
+    [:aconst-null]
+    ~@(maybe-pop position)))
 
 (defmethod gen ::monitor-exit
-  [[op lockee :as form]]
-  `(~@(gen lockee)
+  [{:keys [lock position]}]
+  `(~@(gen lock)
     [:monitorexit]
-    ~@(gen-nil (pos form))))
+    [:aconst-null]
+    ~@(maybe-pop position)))
 
 ;;;; fn invocation
 
@@ -496,22 +553,26 @@
   [[op & args :as form]]
   (run
     [pos (update-val :position #(if (= % :eval) :eval :expression))
+     jt (update-val :want-unboxed nil)
      op (analyze op)
      ;; special case: instanceof
      ;; special case: keyword invoke, static invoke
      args (m-map analyze args)
      _ (set-val :position pos)]
-    (with-meta `(~op ~@(doall args))
-               {::etype ::invocation
-                :position pos})))
+    {::etype ::invocation
+     :op op
+     :args (doall args)
+     :position pos
+     :java-type Object}))
 
 (defmethod gen ::invocation
-  [[op & args :as form]]
+  [{:keys [op args position java-type]}]
   `(~@(gen op)
     [:checkcast ~IFn]
     ~@(mapcat gen args)
     [:invokeinterface ~[IFn 'invoke [:method Object (take (count args)
-                                                          (repeat Object))]]]))
+                                                          (repeat Object))]]]
+    ~@(maybe-pop position)))
 
 ;;;; Assignment
 
@@ -573,18 +634,27 @@
     :else
     (run
       [pos (update-val :position #(if (= % :eval) :eval :statement))
+       jt (set-val :want-unboxed nil)
        stmts (m-map analyze (butlast body))
        _ (set-val :position pos)
+       _ (set-val :want-unboxed jt)
        tail (analyze (last body))]
-      (with-meta `(~'do ~@(doall stmts) ~tail)
-                 {::etype ::do
-                  :position pos}))))
+      {::etype ::do
+       :body (doall (concat stmts [tail]))
+       :position pos})))
 
 (defmethod gen ::do
-  [[_ & body]]
+  [{:keys [body]}]
   (mapcat gen body))
 
 ;;;; Conditional
+
+(defn common-superclass [l r]
+  (cond
+    (isa? l r) r
+    (isa? r l) l
+    :else Object)) ; give up
+
 
 (defmethod analyze [::special 'if]
   [[_ test-expr then else :as form]]
@@ -598,35 +668,90 @@
     :else
     (run
       [pos (fetch-val :position) ; redundant?
+       jt (set-val :want-unboxed Boolean/TYPE)
        test-expr (analyze test-expr)
        _ (push-clear-node :branch false)
        _ (push-clear-node :path false)
+       _ (set-val :want-unboxed jt)
        then (analyze then)
        _ pop-frame
        _ (push-clear-node :path false)
+       _ (set-val :want-unboxed jt)
        else (analyze else)
        _ pop-frame
        _ pop-frame]
-      (with-meta `(if ~test-expr ~then ~else)
-                 (merge (meta form)
-                        {::etype ::if
-                         :position pos})))))
+      (let [left (:java-type then)
+            right (:java-type else)
+            jt (cond
+                 (= left right)
+                 left
+
+                 (or (is-primitive? left) (is-primitive? right))
+                 Object
+
+                 :else
+                 (common-superclass left right))]
+        {::etype ::if
+         :position pos
+         :java-type jt
+         :test test-expr
+         :then then
+         :else else}))))
+
+(defn gen-boxed [orig-type form]
+  (cond
+    (= orig-type Boolean/TYPE)
+    (let [[falsel endl] (map gensym ["False__ " "End__"])]
+    `(~@(gen form)
+      [:ifeq ~falsel]
+      [:getstatic ~[Boolean 'TRUE Boolean]]
+      [:goto ~endl]
+      [:label ~falsel]
+      [:getstatic ~[Boolean 'FALSE Boolean]]
+      [:label ~endl]))
+    (= orig-type Long/TYPE)
+    `([:new ~Long]
+      ~@(gen form)
+      [:invokespecial ~[Long '<init> [:method :void [Long/TYPE]]]])
+    (= orig-type Double/TYPE)
+    `([:new ~Double]
+      ~@(gen form)
+      [:invokespecial ~[Double '<init> [:method :void [Double/TYPE]]]])
+    :else (gen form)))
 
 (defmethod gen ::if
-  [[_ test-expr then else :as form]]
-  (let [[null falsel endl] (map gensym ["Null__" "False__" "End__"])]
-    `(~@(gen test-expr)
-      [:dup]
-      [:ifnull ~null]
-      [:getstatic ~[Boolean 'FALSE Boolean]]
-      [:if-acmpeq ~falsel]
-      ~@(gen then)
-      [:goto ~endl]
-      [:label ~null]
-      [:pop]
-      [:label ~falsel]
-      ~@(gen else)
-      [:label ~endl])))
+  [{:keys [position java-type test then else]}]
+  (let [lt (:java-type then) rt (:java-type else)
+        coerce-left (if (= lt java-type)
+                      (gen then)
+                      (gen-boxed lt then))
+        coerce-right (if (= rt java-type)
+                       (gen else)
+                       (gen-boxed rt else))]
+    (if (can-emit-unboxed? test)
+      (let [[falsel endl] (map gensym ["False__" "End__"])]
+        `(~@(gen test)
+          [:ifeq ~falsel]
+          ~@coerce-left
+          [:goto ~endl]
+          [:label ~falsel]
+          ~@coerce-right
+          [:label ~endl]))
+      (let [[null falsel endl] (map gensym ["Null__" "False__" "End__"])]
+        `(~@(gen test)
+          [:dup]
+          [:ifnull ~null]
+          [:getstatic ~[Boolean 'FALSE Boolean]]
+          [:if-acmpeq ~falsel]
+          ~@coerce-left
+          [:goto ~endl]
+          [:label ~null]
+          [:pop]
+          [:label ~falsel]
+          ~@coerce-right
+          [:label ~endl])))))
+
+;;;; Let & loop
 
 (declare analyze-loop)
 
@@ -640,37 +765,47 @@
 
 (defn analyze-init
   [[sym init]]
-  (cond
-    (not (symbol? sym))
-    (throw (IllegalArgumentException.
-             (str "Bad binding form, expected symbol, got: " sym)))
+  (let [hint (tag-class (tag-of sym))
+        unboxed? (if (is-primitive? hint)
+                   hint true)]
+    (println "let init" hint unboxed?)
+    (cond
+      (not (symbol? sym))
+      (throw (IllegalArgumentException.
+               (str "Bad binding form, expected symbol, got: " sym)))
 
-    (namespace sym)
-    (throw (IllegalArgumentException.
-             (str "Can't let qualified name: " sym)))
+      (namespace sym)
+      (throw (IllegalArgumentException.
+               (str "Can't let qualified name: " sym)))
 
-    :else
-    (run
-      [init (analyze init)
-       lb (make-binding sym nil)]
-      ; maybe coerce init
-      [lb init])))
+      :else
+      (run
+        [_ (set-val :want-unboxed unboxed?)
+         init (analyze init)
+         lb (make-binding sym (:java-type init))]
+        (println "init types" (:java-type lb) (:java-type init))
+        ; maybe coerce init
+        [lb init]))))
 
 (defn analyze-loop0
   [bindings body loop?]
   (run
     [_ (push-frame)
      pos (fetch-val :position)
+     jt (fetch-val :want-unboxed)
      bindings (m-map analyze-init (partition 2 bindings))
      _ (set-val :loop-locals (map first bindings))
      _ (if loop? (set-val :position :return) (m-result nil))
      _ (if loop? (push-clear-node :path true) (m-result nil))
+     _ (set-val :want-unboxed jt)
      body (analyze `(~'do ~@body))
      _ (if loop? pop-frame (m-result nil))
      _ pop-frame]
-    (with-meta `(~'let* ~bindings ~body)
-               {::etype (if loop? ::loop ::let)
-                :position pos})))
+    {::etype (if loop? ::loop ::let)
+     :position pos
+     :java-type (:java-type body)
+     :bindings bindings
+     :body body}))
 
 (defn analyze-loop
   [[_ bindings & body :as form] loop?]
@@ -690,6 +825,18 @@
            (analyze `(fn* [] ~form))
            (analyze-loop0 bindings body loop?))]
       r)))
+
+(defmethod gen ::let
+  [{:keys [java-type bindings body]}]
+  (let [lbs (map first bindings)
+        block-init (mapcat (juxt :label :java-type) lbs)]
+    `((:block nil nil ~block-init
+        ~@(mapcat
+            (fn [[lb init]]
+              `(~@(gen init)
+                ~[(store-op (:java-type lb)) (:label lb)]))
+            bindings)
+        ~@(gen body)))))
 
 (defn normalize-fn*
   [[op & opts :as form]]
@@ -726,7 +873,6 @@
 ;;;; Closure
 
 (declare analyze-method compile-class)
-(def *comclass* nil)
 (defn variadic? [argv]
   (not (nil? (:rest-param argv))))
 
@@ -783,8 +929,6 @@
                         (apply compile-class args)))
                     obj (if variadic RestFn AFunction) [])
               (await classloader))
-;            (def *comclass* (conj *comclass* (bin/read-binary ::asm/ClassFile
-;                                             (bin/buffer-wrap bytecode))))
             (with-meta [(:name obj) initargs]
                        {::etype ::fn
                         :position pos})))))))
@@ -1159,7 +1303,7 @@
             (println "Caught" (class e) e)))))
     loader))
 
-      (let [bytecode (.array bytecode)]
+      #_(let [bytecode (.array bytecode)]
         (when *compile-files*
           (write-class-file obj bytecode))
         bytecode)

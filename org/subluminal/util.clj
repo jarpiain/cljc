@@ -42,6 +42,40 @@
         body (sat-body s form)]
     `(fn [~s] (if ~body true false))))
 
+(defmacro run-with
+  [init bind & body]
+  (let [gstate (gensym "STATE__") gname (gensym "run")
+        bind (reduce concat
+                    (for [[v init] (partition 2 bind)]
+                      [[v gstate] `(~init ~gstate)]))]
+    `(with-monad state-m
+       (let ~(vec (list* gstate init bind))
+         ~@(butlast body)
+         ~[(last body) gstate]))))
+
+(defmacro run
+  "Same as (domonad state-m ...)"
+  [bind & body]
+  `(fn [init#]
+     (run-with init#
+       ~bind
+       ~@body)))
+
+(defn fetch-in
+  [& keys]
+  (fn [state]
+    [(get-in state keys) state]))
+
+(defn set-vals
+  [& pairs]
+  (fn [state]
+    [nil (apply assoc state pairs)]))
+
+(defn set-nested
+  [keys val]
+  (fn [state]
+    [nil (assoc-in state keys val)]))
+
 (def parser-m (state-t maybe-m))
 
 (defn match-char

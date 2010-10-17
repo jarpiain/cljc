@@ -6,7 +6,8 @@
                          LazySeq IPersistentMap IObj
                          RestFn AFunction
                          RT Var Symbol Keyword ISeq IFn))
-  (:use (clojure.contrib monads))
+  (:use (clojure.contrib monads)
+        (org.subluminal util))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
 (def gen nil)
@@ -311,12 +312,12 @@
   ([form] (tea form :expression))
   ([form pos]
    (let [[res ctx]
-         ((domonad state-m
-            [_ (push-object-frame {:name 'toplevel})
-             _ (set-val :position pos)
-             a (analyze form)
-             _ pop-frame]
-            a) null-context)]
+         (run-with null-context
+           [_ (push-object-frame {:name 'toplevel})
+            _ (set-val :position pos)
+            a (analyze form)
+            _ pop-frame]
+           a)]
      res)))
 (defn teg "Test gen"
   ([form] (gen (tea form)))
@@ -389,7 +390,7 @@
 
 (defmethod analyze ::symbol
   [sym]
-  (domonad state-m
+  (run
     [lex (resolve-lexical sym)
      pos (fetch-val :position)
      bind (if lex
@@ -457,7 +458,7 @@
 
 (defmethod analyze [::special 'monitor-enter]
   [[_ lockee]]
-  (domonad state-m
+  (run
     [pos (set-val :position :expression)
      lockee (analyze lockee)
      _ (set-val :position pos)]
@@ -467,7 +468,7 @@
 
 (defmethod analyze [::special 'monitor-exit]
   [[_ lockee]]
-  (domonad state-m
+  (run
     [pos (set-val :position :expression)
      lockee (analyze lockee)
      _ (set-val :position pos)]
@@ -491,7 +492,7 @@
 
 (defmethod analyze ::invocation
   [[op & args :as form]]
-  (domonad state-m
+  (run
     [pos (update-val :position #(if (= % :eval) :eval :expression))
      op (analyze op)
      ;; special case: instanceof
@@ -517,7 +518,7 @@
   (if (not= (count form) 3)
     (throw (IllegalArgumentException.
              "Malformed assignment, expecting (set! target val)"))
-    (domonad state-m
+    (run
       [pos (set-val :position :expression)
        target (analyze target)
        value (analyze value)
@@ -568,7 +569,7 @@
     (analyze (first body))
 
     :else
-    (domonad state-m
+    (run
       [pos (update-val :position #(if (= % :eval) :eval :statement))
        stmts (m-map analyze (butlast body))
        _ (set-val :position pos)
@@ -593,7 +594,7 @@
     (throw (Exception. "Too few arguments to if"))
 
     :else
-    (domonad state-m
+    (run
       [pos (fetch-val :position) ; redundant?
        test-expr (analyze test-expr)
        _ (push-clear-node :branch false)
@@ -647,7 +648,7 @@
              (str "Can't let qualified name: " sym)))
 
     :else
-    (domonad state-m
+    (run
       [init (analyze init)
        lb (make-binding sym nil)]
       ; maybe coerce init
@@ -655,7 +656,7 @@
 
 (defn analyze-loop0
   [bindings body loop?]
-  (domonad state-m
+  (run
     [_ (push-frame)
      pos (fetch-val :position)
      bindings (m-map analyze-init (partition 2 bindings))
@@ -680,7 +681,7 @@
              "Bad binding form, expected matching symbol expression pairs"))
 
     :else
-    (domonad state-m
+    (run
       [pos (fetch-val :position)
        r (if (or (= pos :eval)
                  (and loop? (= pos :expression)))
@@ -692,7 +693,7 @@
   [[op & opts :as form]]
   (let [this-name (when (symbol? (first opts)) (first opts))
         static? (:static (meta this-name))]
-    (domonad state-m
+    (run
       [n (if this-name
            (m-result this-name)
            (fetch-val :name))
@@ -733,7 +734,7 @@
 
 (defmethod analyze [::special 'fn*]
   [[op & opts :as form]]
-  (domonad state-m
+  (run
     [pos (fetch-val :position)
      [op & meth :as norm] (normalize-fn* form)
      _ (push-object-frame (meta norm))
@@ -850,7 +851,7 @@
                  (not (or (= ret-class Long/TYPE) (= ret-class Double/TYPE))))
         (throw (IllegalArgumentException.
                  "Only long and double primitives are supported")))
-      (domonad state-m
+      (run
         [{:keys [this-name static?] :as this-fn} (fetch-val :fn)
          argv (m-result (process-fn*-args argv static?))
          _ (push-method-frame {:loop-label (gensym "LL")

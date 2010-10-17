@@ -3,6 +3,7 @@
            (java.nio ByteBuffer)
            (java.util IdentityHashMap)
            (clojure.lang LineNumberingPushbackReader
+                         DynamicClassLoader
                          LazySeq IPersistentMap IObj
                          RestFn AFunction
                          RT Var Symbol Keyword ISeq IFn))
@@ -14,6 +15,7 @@
 (def analyze nil)
 
 (defstruct context
+           :loader
            :position    ; :eval :statement :expression :return
            :lexicals    ; symbol -> struct lex-binding
            :loop-locals ; vector lex-binding
@@ -312,7 +314,7 @@
   ([form] (tea form :expression))
   ([form pos]
    (let [[res ctx]
-         (run-with null-context
+         (run-with (assoc null-context :loader (agent (DynamicClassLoader.)))
            [_ (push-object-frame {:name 'toplevel})
             _ (set-val :position pos)
             a (analyze form)
@@ -735,7 +737,8 @@
 (defmethod analyze [::special 'fn*]
   [[op & opts :as form]]
   (run
-    [pos (fetch-val :position)
+    [classloader (fetch-val :loader)
+     pos (fetch-val :position)
      [op & meth :as norm] (normalize-fn* form)
      _ (push-object-frame (meta norm))
      meth (m-map analyze-method meth)
@@ -772,10 +775,16 @@
                              :methods (filter identity a)
                              :variadic-method variadic)
                       {::etype ::fn
-                       :position pos})
-                bytecode (compile-class obj (if variadic RestFn AFunction) [])]
-            (def *comclass* (conj *comclass* (bin/read-binary ::asm/ClassFile
-                                             (bin/buffer-wrap bytecode))))
+                       :position pos})]
+            (let [out *out*]
+              (send classloader
+                    (bound-fn [& args]
+                      (binding [*out* out]
+                        (apply compile-class args)))
+                    obj (if variadic RestFn AFunction) [])
+              (await classloader))
+;            (def *comclass* (conj *comclass* (bin/read-binary ::asm/ClassFile
+;                                             (bin/buffer-wrap bytecode))))
             (with-meta [(:name obj) initargs]
                        {::etype ::fn
                         :position pos})))))))
@@ -1072,7 +1081,8 @@
 (defn write-class-file [& more])
 
 (defn compile-class
-  [obj super ifaces]
+  [loader obj super ifaces]
+  (println "Called compile-class")
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces
@@ -1135,12 +1145,24 @@
     (emit-methods obj c)
     (asm/assemble-class c)
 
-    (let [bytecode (ByteBuffer/allocate 1000)] 
+    (let [bytecode (ByteBuffer/allocate 10000)] 
       (bin/write-binary ::asm/ClassFile bytecode c)
+      (let [siz (.position bytecode)
+            arr (byte-array siz)]
+        (println ".class file size" siz)
+        (.flip bytecode)
+        (.get bytecode arr)
+        (try
+          (println "Loading class" (:name obj))
+          (.defineClass loader (str (:name obj)) arr nil)
+          (catch Throwable e
+            (println "Caught" (class e) e)))))
+    loader))
+
       (let [bytecode (.array bytecode)]
         (when *compile-files*
           (write-class-file obj bytecode))
-        bytecode))))
+        bytecode)
 
 ;;;; toplevel
 

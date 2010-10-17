@@ -433,9 +433,12 @@
             (m-result 'var))]
     (let [btype (:java-type bind)
           res (assoc bind ::etype ::local-binding :position pos)]
-      (if (and (is-primitive? btype) (not= btype unbox-type))
+      (cond
+        (true? unbox-type)
+        res
+        (and (is-primitive? btype) (not= btype unbox-type))
         (assoc res :java-type Number :unbox-type btype)
-        res))))
+        :else res))))
 
 ;;;; Number
 
@@ -596,6 +599,8 @@
                     :position pos})
         (throw (IllegalArgumentException. "Invalid assignment target"))))))
 
+;;;;
+
 (defmethod analyze [::special 'recur]
   [[_ & inits :as form]]
   (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
@@ -614,15 +619,33 @@
 
       :valid
       (let [[inits ctx]
-            ((with-monad state-m (m-map analyze inits)) ctx)
-            analyzed-form (list* 'recur inits)]
-        [(with-meta analyzed-form
-                    (merge (meta form)
-                           {::etype ::recur
-                            :position position
-                            ::loop-label loop-label
-                            ::loop-locals loop-locals}))
+            (run-with ctx
+              [_ (set-val :want-unboxed true)
+               is (m-map analyze inits)]
+              is)]
+        [{::etype ::recur
+          :position position ; redundant
+          :inits inits
+          :loop-label loop-label
+          :loop-locals loop-locals}         
          ctx]))))
+
+(defmethod gen ::recur
+  [{:keys [inits loop-label loop-locals]}]
+  `(~@(mapcat (fn [i lb]
+                (let [have-type (:java-type i)
+                      need-type (:java-type lb)
+                      doinit (cond
+                               (= have-type need-type)
+                               (gen i)
+                               :else
+                               (do (println "have type" have-type
+                                            "need type" need-type)
+                                 nil))]
+                  `(~@doinit
+                    ~[(store-op need-type) (:label lb)])))
+              inits loop-locals)
+    [:goto ~loop-label]))
 
 ;;;; Sequencing
 

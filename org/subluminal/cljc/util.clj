@@ -37,11 +37,79 @@
         (throw (Exception. (str "Expecting var, but " sym
                                 " is mapped to " o)))))))
 
-#_(defn lookup-var [sym intern?]
-  (let [v (lookup-var0 sym intern?)]
-    (if v
-      (register-var v)
-      (m-result v))))
+;; Try to resolve (in order):
+;; 1. fully.qualified.Class or [LArrayClass;
+;;    -> Class object or ClassNotFoundException
+;; 2. always resolve the symbols 'ns' and 'in-ns' in namespace clojure.core
+;; (2b. compiler-stub)
+;; 3. ns-map of rel-ns
+;;    -> interned Var, referred Var
+;;       or imported Class
+;; (3b. *allow-unresolved-vars*)
+;; 4. throw "unable to resolve"
+;;       
+;; Not using ns-resolve since that fn delegates to clojure.lang.Compiler
+(defn resolve-unqualified [^Namespace rel-ns sym]
+  (cond
+    (or (>= (.indexOf (name sym) (int \.)) 0) (= (.charAt (name sym) 0) \[))
+    (RT/classForName (name sym))
+    
+    (= sym 'ns) #'clojure.core/ns
+    (= sym 'in-ns) #'clojure.core/in-ns
+
+    :else
+    (if-let [o (.getMapping rel-ns sym)]
+      o
+      (throw (Exception. (str "Unable to resolve " sym
+                              " in this context"))))))
+
+;; Try to resolve (in order):
+;; 1. ns-alias/interned-var
+;;    or qualified.ns/interned-var
+;;    -> Var or throw if not found and public
+;; 2. fully.qualified.Class/staticField
+;;    or ImportedClass/staticField
+;;    -> java.reflect.Field or throw if no such field
+;; 3. throw "no such namespace"
+(defn resolve-qualified [^Namespace rel-ns sym]
+  (let [ns-part (symbol (namespace sym))
+        ns-for (.lookupAlias rel-ns ns-part)
+        ns-for (if ns-for ns-for
+                 (Namespace/find ns-part))]
+    (if ns-for
+      (let [v (.findInternedVar ns-for (symbol (name sym)))]
+        (cond
+          (nil? v)
+          (throw (Exception. (str "No such var: " sym)))
+          (and (not= ns-for rel-ns) (not (.isPublic v)))
+          (throw (IllegalStateException.
+                   (str "var: " sym " is not public")))
+          :else v))
+      (if-let [^Class c (maybe-class rel-ns ns-part false)]
+        (if-let [f (Reflector/getField c (name sym) true)]
+          {::etype ::static-field
+           :class c
+           :name (symbol (name sym))}
+          (throw (Exception. (str "Unable to find static field: " (name sym)
+                                  " in " c))))
+        (throw (Exception. (str "No such namespace: " ns-part)))))))
+
+(defn resolve-sym [n sym]
+  (if (namespace sym)
+    (resolve-qualified n sym)
+    (resolve-unqualified n sym)))
+
+(defn lookup-sym [n sym]
+  (let [o (resolve-sym n sym)]
+    (cond
+      (var? o)
+      (if (.isMacro o)
+        (throw (Exception. "Can't take value of a macro: " o))
+        (register-var o))
+      (class? o)
+      (register-constant o)
+      :else
+      (m-result {::etype ::static-field}))))
 
 #_(defn close-over [binding method]
   (when (and binding method
@@ -85,41 +153,6 @@
                  (.substring 0 (.lastIndexOf f (int \.))))
                RT/LOADER_SUFFIX)))
 
-(defn constant-name [n]
-  (symbol (str "const__" n)))
-
-(defn site-name [n]
-  (symbol (str "__site__" n)))
-
-(defn site-name-static [n]
-  (symbol (str (site-name [n]) "__")))
-
-(defn thunk-name [n]
-  (symbol (str "__thunk__" n)))
-
-(defn thunk-name-static [n]
-  (symbol (str (thunk-name n) "__")))
-
-(defn cached-class-name [n]
-  (symbol (str "__cached_class__" n)))
-
-(defn cached-proto-fn-name [n]
-  (symbol (str "__cached_proto_fn__" n)))
-
-(defn cached-proto-impl-name [n]
-  (symbol (str "__cached_proto_impl__" n)))
-
-(defn var-callsite-name [n]
-  (symbol (str "__var__callsite__" n)))
-
-;; common method specifiers
-(def mspec
-  {'kwintern  [Keyword "intern"   [:method Keyword [String String]]]
-   'symcreate [Symbol  "create"   [:method Symbol [String]]]
-   'varintern [Var     "intern"   [:method Var [String String]]]
-   'getclass  [Class   "getClass" [:method Class []]]
-   'get-class-loader [Class "getClassLoader" [:method ClassLoader []]]})
-
 (def +char-map+
   {\- "_"
    \: "_COLON_"
@@ -145,11 +178,15 @@
    \\ "_BSLASH_"
    \? "_QMARK_"})
 
-(defn munge-impl [s]
+(defn munge-impl
+  "Convert the name of a Clojure symbol into a valid Java identifier"
+  [s]
   (apply str (map #(get +char-map+ % %) s)))
 
+;;;; Resolve :tag metadata to a class
+
 (defn maybe-class
-  [tag string-ok?]
+  [^Namespace nss tag string-ok?]
   (cond
     (class? tag) tag
 
@@ -164,7 +201,7 @@
 
       :else
       (try
-        (let [c (resolve tag)]
+        (let [c (.getMapping nss tag)]
           (if (class? c) c
             (RT/classForName (name tag))))
         (catch ClassNotFoundException e
@@ -173,7 +210,7 @@
     (and string-ok? (string? tag))
     (RT/classForName ^String tag)))
 
-(def prim-class
+(def ^{:private true} prim-class
   {'int Integer/TYPE
    'long Long/TYPE
    'double Double/TYPE
@@ -184,7 +221,7 @@
    'boolean Boolean/TYPE
    'void Void/TYPE })
 
-(def array-tags
+(def ^{:private true} array-tags
    {'objects (class (make-array Object 0))
     'ints (class (int-array 0))
     'longs (class (long-array 0))
@@ -195,20 +232,24 @@
     'chars (class (char-array 0))
     'booleans (class (boolean-array 0))})
 
-(defn tag-to-class [tag]
+(defn- tag-to-class [nss tag]
   (if-let [c (array-tags tag)] c
-    (if-let [c (maybe-class tag true)] c
+    (if-let [c (maybe-class nss tag true)] c
       (throw (IllegalArgumentException.
                (str "Unable to resolve classname: " tag))))))
 
-(defn tag-class [tag]
+(defn tag-class
+  "Try to interpret the :tag metadata of an object as a Class"
+  [nss tag]
   (if (nil? tag)
     Object
     (if-let [c (prim-class tag)]
       c
-      (tag-to-class tag))))
+      (tag-to-class nss tag))))
 
-(defn tag-of [thing]
+(defn tag-of
+  "Returns the :tag metadata of an object as a symbol"
+  [thing]
   (let [tag (:tag (meta thing))]
     (cond
       (symbol? tag)

@@ -3,9 +3,9 @@
            (java.nio ByteBuffer)
            (java.util IdentityHashMap)
            (clojure.lang LineNumberingPushbackReader
-                         DynamicClassLoader
+                         DynamicClassLoader Reflector
                          LazySeq IPersistentMap IObj
-                         RestFn AFunction
+                         RestFn AFunction Namespace
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
         (clojure inspector)
@@ -77,16 +77,29 @@
           (.put (:constant-ids curr-obj) obj c)
           [c (assoc-in ctx [:index (:fn ctx)] curr-obj)])))))
 
+;; Like register-constant except the expression type is
+;; changed to ::keyword or ::var
+;; --> will be treated specially in fn invocation context
+
 (defn register-keyword [kw]
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [prev (get (:keywords curr-obj) kw)]
         [prev ctx]
         (let [[c ctx] ((register-constant kw) ctx)
-              k (merge c
-                       {::etype ::keyword})]
+              k (assoc c ::etype ::keyword)]
           [k (update-in ctx [:index (:fn ctx) :keywords]
-                        assoc k kw)])))))
+                        assoc kw k)])))))
+
+(defn register-var [v]
+  (fn [ctx]
+    (let [curr-obj (get (:index ctx) (:fn ctx))]
+      (if-let [prev (get (:vars curr-obj) v)]
+        [prev ctx]
+        (let [[c ctx] ((register-constant v) ctx)
+              vv (assoc c ::etype ::var)]
+          [vv (update-in ctx [:index (:fn ctx) :vars]
+                         assoc v vv)])))))
 
 (defn push-method-frame [m]
   (let [tag (gensym "MT__")
@@ -202,6 +215,7 @@
 (defn make-binding-instance [b]
   (fn [ctx]
     (let [inst (assoc b :clear-path ctx
+                        ::etype ::local-binding
                         :live (atom (not= (:clear-root b)
                                           (:clear-root ctx))))
           lives (get-in ctx [:binding-sites (:label b)])
@@ -420,6 +434,8 @@
 ;;;; Keyword
 
 (derive ::keyword ::constant)
+(derive ::var ::constant)
+
 (defmethod analyze ::keyword
   [kw]
   (register-keyword kw))
@@ -432,15 +448,24 @@
      pos (fetch-val :position)
      bind (if lex
             (make-binding-instance lex)
-            (m-result 'var))]
-    (let [btype (:java-type bind)
-          res (assoc bind ::etype ::local-binding :position pos)]
-      (cond
-        (true? unbox-type)
-        res
-        (and (is-primitive? btype) (not= btype unbox-type))
-        (assoc res :java-type Number :unbox-type btype)
-        :else res))))
+            (lookup-sym *ns* sym))]
+    (condp = (::etype bind)
+      ::local-binding
+      (let [btype (:java-type bind)
+            hint (tag-class *ns* (tag-of sym))
+            res (assoc bind :position pos)]
+        (cond
+          (true? unbox-type)
+          res
+          (and (is-primitive? btype) (not= btype unbox-type))
+          (assoc res :java-type Number :unbox-type btype)
+          :else res))
+
+      ::static-field
+      (throw (Exception. "static-field is unimplemented"))
+
+      ::var bind
+      ::constant bind)))
 
 ;;;; Number
 
@@ -790,7 +815,7 @@
 
 (defn analyze-init
   [[sym init]]
-  (let [hint (when (:tag (meta sym)) (tag-class (tag-of sym)))]
+  (let [hint (when (:tag (meta sym)) (tag-class *ns* (tag-of sym)))]
     (cond
       (not (symbol? sym))
       (throw (IllegalArgumentException.
@@ -1000,7 +1025,7 @@
             (throw (Exception. "Invalid parameter list")))
 
           :else
-          (let [c (tag-class (tag-of arg))
+          (let [c (tag-class *ns* (tag-of arg))
                 c (if (= state :rest) ISeq c)]
             (cond
               (and (.isPrimitive c) (not static?))
@@ -1031,7 +1056,7 @@
   (if (not (vector? argv))
     (throw (IllegalArgumentException.
              "Malformed method, expected argument vector"))
-    (let [ret-class (tag-class (tag-of argv))]
+    (let [ret-class (tag-class *ns* (tag-of argv))]
       (when (and (.isPrimitive ret-class)
                  (not (or (= ret-class Long/TYPE) (= ret-class Double/TYPE))))
         (throw (IllegalArgumentException.

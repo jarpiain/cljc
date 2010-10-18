@@ -37,7 +37,7 @@
         (throw (Exception. (str "Expecting var, but " sym
                                 " is mapped to " o)))))))
 
-(defn lookup-var [sym intern?]
+#_(defn lookup-var [sym intern?]
   (let [v (lookup-var0 sym intern?)]
     (if v
       (register-var v)

@@ -8,6 +8,7 @@
                          RestFn AFunction
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
+        (clojure inspector)
         (org.subluminal util))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
@@ -69,6 +70,7 @@
         (let [c {::etype ::constant
                  :position (:position ctx)
                  :val (gensym "const__")
+                 :orig obj
                  :java-type (class obj)
                  :obj (:name curr-obj)}
               curr-obj (update-in curr-obj [:constants] conj c)]
@@ -274,7 +276,7 @@
                :parent parent
                :loop-locals (:loop-locals parent))))))
 
-;(load "cljc/util")
+(load "cljc/util")
 
 (defn etype [x]
   (::etype (meta x)))
@@ -483,7 +485,6 @@
     ~@(maybe-pop position)))
 
 (defn load-op [jt]
-  (println "load-op" jt)
   (cond
     (= jt Long/TYPE) :lload
     (= jt Double/TYPE) :dload
@@ -952,19 +953,19 @@
             (throw (Exception. "Static fns can't be closures")))
           ;; compile & load
           ;; add metadata from original form
-          (let [obj (with-meta
-                      (assoc f
-                             :methods (filter identity a)
-                             :variadic-method variadic)
-                      {::etype ::fn
-                       :position pos})]
+          (let [obj (assoc f
+                           :methods (filter identity a)
+                           :variadic-method variadic)]
             (let [out *out*]
               (send classloader
                     (bound-fn [& args]
                       (binding [*out* out]
                         (apply compile-class args)))
                     obj (if variadic RestFn AFunction) [])
-              (await classloader))
+              (try
+                (await-for 1000 classloader)
+                (if-let [e (agent-error classloader)]
+                  (throw e))))
             {::etype ::fn
              :class-name (:name obj)
              :initargs initargs
@@ -1166,7 +1167,44 @@
     ~@(when (= ctx :statement)
         [[:pop]])))
 )
-(defn emit-constants [& more])
+
+(defn gen-constant [c]
+  (cond
+    (class? c)
+    (if (.isPrimitive ^Class c)
+      (cond
+        (= c Boolean/TYPE) `([:getstatic ~[Boolean 'TYPE Class]])
+        (= c Byte/TYPE)    `([:getstatic ~[Byte 'TYPE Class]])
+        (= c Short/TYPE)   `([:getstatic ~[Short 'TYPE Class]])
+        (= c Integer/TYPE) `([:getstatic ~[Integer 'TYPE Class]])
+        (= c Long/TYPE)    `([:getstatic ~[Long 'TYPE Class]])
+        (= c Float/TYPE)   `([:getstatic ~[Float 'TYPE Class]])
+        (= c Double/TYPE)  `([:getstatic ~[Double 'TYPE Class]])
+        (= c Void/TYPE)    `([:getstatic ~[Void 'TYPE Class]]))
+      `([:ldc ~(.getName c)]
+        [:invokestatic ~[Class 'forName [:method Class [String]]]]))
+
+    (symbol? c)
+    `([:ldc ~(namespace c)]
+      [:ldc ~(name c)]
+      [:invokestatic ~[Symbol 'create [:method Symbol [String String]]]])
+
+    (keyword? c)
+    `([:ldc ~(namespace c)]
+      [:ldc ~(name c)]
+      [:invokestatic ~[Keyword 'intern [:method Keyword [String String]]]])
+
+    (var? c)
+    `([:ldc ~(str (.name (.ns c)))]
+      [:ldc ~(str (.sym c))]
+      [:invokestatic ~[RT 'var [:method Var [String String]]]])))
+
+(defn emit-constants [obj cref mref]
+  (doseq [{:keys [val java-type obj orig]} (:constants obj)]
+    (asm/emit cref mref
+      `(~@(gen-constant orig)
+        [:checkcast ~java-type]
+        [:putstatic [~obj ~val ~java-type]]))))
 
 ;; TODO: defmulti --> deftypes also
 (defn emit-methods [obj cref]
@@ -1194,15 +1232,15 @@
                       :implements ifaces
                       :flags #{:public :super :final}}]
     (doseq [fld (:constants obj)]
-      (let [{:keys [cls]} (meta fld)]
-        (asm/add-field c {:name fld
-                          :descriptor cls
+      (let [{:keys [val java-type]} fld]
+        (asm/add-field c {:name val
+                          :descriptor java-type
                           :flags #{:public :final :static}})))
 
     (let [clinit (asm/add-method c {:name '<clinit>
                                     :descriptor [:method :void []]
                                     :flags #{:public :static}})]
-      (emit-constants c clinit)
+      (emit-constants obj c clinit)
       (asm/emit1 c clinit [:return])
       (asm/assemble-method clinit))
 
@@ -1247,7 +1285,6 @@
           [:areturn]))
       (asm/assemble-method with-meta))
 
-
     (emit-methods obj c)
     (asm/assemble-class c)
 
@@ -1258,9 +1295,11 @@
         (println ".class file size" siz)
         (.flip bytecode)
         (.get bytecode arr)
+        (.clear bytecode)
         (try
           (println "Loading class" (:name obj))
           (.defineClass loader (str (:name obj)) arr nil)
+          (inspect-tree (bin/read-binary ::asm/ClassFile bytecode))
           (catch Throwable e
             (println "Caught" (class e) e)))))
     loader))

@@ -1852,7 +1852,7 @@
          :if-icmplt :if-icmpge :if-icmpgt :if-icmple
          :ifeq :ifne :iflt :ifge :ifgt :ifle
          :ifnonnull :ifnull :instanceof
-         :invokedynamic :invokespecial :invokevirtual
+         :invokedynamic :invokespecial :invokevirtual :invokestatic
          :jsr :jsr-w :ldc2-w :multianewarray :new :newarray
          :putfield :putstatic :sipush)
         ins

@@ -790,6 +790,67 @@
 
 ;;;; Assignment
 
+(defmethod analyze [::special 'def]
+  [[_ target init :as form]]
+  (cond
+    (> (count form) 3)
+    (throw (Exception. "Too many arguments to def"))
+    (< (count form) 2)
+    (throw (Exception. "Too few arguments to def"))
+    (not (symbol? target))
+    (throw (Exception. "First argument to def must be a Symbol"))
+    :else
+    (let [^Var v (lookup-var *ns* target true)]
+      (if (nil? v)
+        (throw (Exception. "Can't refer to qualified var that doesn't exist"))
+        (let [v (cond
+                  (= (.ns v) *ns*) v
+                  (nil? (namespace target)) (intern *ns* target)
+                  :else (throw (Exception.
+                                 "Can't create defs outside of current ns")))
+              mm (meta target)]
+          (when (:static mm)
+            ;; Not the right place to do this...
+            (alter-meta! v assoc
+                         :static true
+                         :arglists (second (:arglists mm))))
+          (run [pos (update-val :position #(if (= % :eval) % :expression))
+                meta-expr (analyze mm)
+                _ (set-val :name (name target))
+                init-expr (analyze init)
+                v (analyze `(~'var ~target))
+                _ (set-val :position pos)]
+            {::etype ::def
+             :metamap meta-expr
+             :target v
+             :java-type Var
+             :init init-expr
+             :position pos
+             :init-provided? (== (count form) 3)}))))))
+
+(defmethod gen ::def
+  [{:keys [metamap target init init-provided? position]}]
+  `(~@(gen target)
+    ~@(when metamap
+        `([:dup]
+          ~@(gen metamap)
+          [:checkcast ~IPersistentMap]
+          [:invokevirtual ~[Var 'setMeta [:method :void [IPersistentMap]]]]))
+    ~@(when init-provided?
+        `([:dup]
+          ~@(gen init)
+          [:invokevirtual ~[Var 'bindRoot [:method :void [Object]]]]))
+    ~@(maybe-pop position)))
+
+(defmethod eval-toplevel ::def
+  [{:keys [metamap target init init-provided?]} loader]
+  (let [the-var (eval-toplevel target loader)]
+    (if init-provided?
+      (.bindRoot the-var (eval-toplevel init loader))
+      (if metamap
+        (reset-meta! the-var (eval-toplevel metamap loader))))
+    the-var))
+
 (defmethod analyze [::special 'set!]
   [[_ target value :as form]]
   (if (not= (count form) 3)

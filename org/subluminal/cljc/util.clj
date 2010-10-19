@@ -276,12 +276,12 @@
 (def *macroexpand-limit* 100)
 
 (def +specials+
-  #{'if 'let* 'loop* 'fn* 'recur
-    'var 'monitor-enter 'monitor-exit
-    'clojure.core/import*
+  #{'if 'let* 'loop* 'fn* 'recur 'quote
+    'var 'def 'monitor-enter 'monitor-exit
     ;; TODO:
-    'throw 'try 'catch 'finally 'quote 'case* '.
-    'def 'letfn* 'set! 'deftype* 'reify* 'new '&})
+    'clojure.core/import*
+    'throw 'try 'catch 'finally 'case* '.
+    'letfn* 'set! 'deftype* 'reify* 'new '&})
 
 (defn macroexpand1-impl
   [nss env form]

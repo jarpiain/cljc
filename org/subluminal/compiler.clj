@@ -312,6 +312,7 @@
       (seq? x) [::special (first x)]
       (vector? x) ::vector
       (map? x) ::map
+      (set? x) ::set
       :else ::constant)))
 
 (defmulti analyze
@@ -624,18 +625,22 @@
 (defmethod analyze ::invocation
   [[op & args :as form]]
   (run
-    [pos (update-val :position #(if (= % :eval) :eval :expression))
-     jt (set-val :want-unboxed nil)
-     op (analyze op)
-     ;; special case: instanceof
-     ;; special case: keyword invoke, static invoke
-     args (m-map analyze args)
-     _ (set-val :position pos)]
-    {::etype ::invocation
-     :op op
-     :args (doall args)
-     :position pos
-     :java-type Object}))
+    [me (macroexpand-impl *ns* form)
+     res (if-not (identical? me form)
+           (analyze me)
+           (run [pos (update-val :position #(if (= % :eval) :eval :expression))
+                 jt (set-val :want-unboxed nil)
+                 op (analyze op)
+                 ;; special case: instanceof
+                 ;; special case: keyword invoke, static invoke
+                 args (m-map analyze args)
+                 _ (set-val :position pos)]
+                {::etype ::invocation
+                 :op op
+                 :args (doall args)
+                 :position pos
+                 :java-type Object}))]
+    res))
 
 (defmethod gen ::invocation
   [{:keys [op args position java-type]}]
@@ -1039,16 +1044,13 @@
           (let [obj (assoc f
                            :methods (filter identity a)
                            :variadic-method variadic)]
-            (let [out *out*]
-              (send classloader
-                    (bound-fn [& args]
-                      (binding [*out* out]
-                        (apply compile-class args)))
-                    obj (if variadic RestFn AFunction) [])
-              (try
-                (await-for 1000 classloader)
-                (if-let [e (agent-error classloader)]
-                  (throw e))))
+            ;(compile-class @classloader obj (if variadic RestFn AFunction) [])
+            (send classloader (bound-fn [& args] (apply compile-class args))
+                  obj (if variadic RestFn AFunction) [])
+            (try
+              (await-for 1000 classloader)
+              (if-let [e (agent-error classloader)]
+                (throw e)))
             {::etype ::fn
              :class-name (:name obj)
              :initargs initargs
@@ -1069,7 +1071,7 @@
 
 (defmethod eval-toplevel ::fn
   [{:keys [class-name initargs]} loader]
-  (await loader)ClassLoader
+  (await loader)
   (let [^Class c (.loadClass @loader (str class-name))
         eargs (doall (map #(eval-toplevel % loader) initargs))
         ^Constructor ctor
@@ -1192,64 +1194,6 @@
             (map (partial analyze ctx) form)
             {::etype ::invoke}))))))
 
-;;;; macro expansion
-
-(def *macroexpand-limit* 100)
-(declare macroexpand1-impl)
-
-(defn macroexpand-impl [form]
-  (loop [f form n 0]
-    (let [fx (macroexpand1-impl f)]
-      (if (identical? f fx)
-        f
-        (if (and *macroexpand-limit* (>= n *macroexpand-limit*))
-          (throw (RuntimeException. (str "Runaway macroexpansion: " form)))
-          (recur fx (inc n)))))))
-
-(defn macroexpand1-impl [form]
-  (if-not (seq? form)
-    form
-    (let [op (first form)]
-      (if (contains? +specials+ op)
-        form
-        (if-let [v (the-macro op)]
-          (apply v form *local-env* (next form))
-          (if-not (symbol? op)
-            form
-            (let [sname (name op)]
-              (cond
-                (= (.charAt sname 0) \.)
-                (if-not (next form) ; (< length 2)
-                  (throw (IllegalArgumentException.
-                           (str "Malformed member expression: " form
-                                ", expecting (.member target ...)")))
-                  (let [meth (symbol (.substring sname 1))
-                        target (second form)
-                        target (if nil ; (maybe-class target false)
-                                 (with-meta
-                                   `(identity ~target)
-                                   {:tag Class})
-                                 target)]
-                    (with-meta
-                      `(~'. ~target ~meth ~@(nnext form))
-                      (meta form))))
-
-                (names-static-member? op)
-                (let [target (symbol (namespace op))
-                      meth (symbol (name op))
-                      c String] ;(maybe-class target false)]
-                  (if-not c form
-                    (with-meta
-                      `(~'. ~target ~meth ~@(next form))
-                      (meta form))))
-
-                (.endsWith sname ".")
-                (with-meta
-                  `(~'new ~(symbol (.substring sname (dec (count sname)))) ~@(next form))
-                  (meta form))
-
-                :else form))))))))
-
 ;;;; String literal
 
 (defmethod literal-val String
@@ -1332,7 +1276,6 @@
 
 (defn compile-class
   [loader obj super ifaces]
-  (println "Called compile-class")
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces
@@ -1398,17 +1341,15 @@
       (bin/write-binary ::asm/ClassFile bytecode c)
       (let [siz (.position bytecode)
             arr (byte-array siz)]
-        (println ".class file size" siz)
         (.flip bytecode)
         (.get bytecode arr)
         (.clear bytecode)
         (try
-          (println "Loading class" (:name obj))
           (.defineClass loader (str (:name obj)) arr nil)
           (when *debug-inspect*
             (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))
           (catch Throwable e
-            (println "Caught" (class e) e)))))
+            (println "Caught while loading class:" (class e) e)))))
     loader))
 
 ;;;; toplevel

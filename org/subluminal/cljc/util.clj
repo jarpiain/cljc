@@ -153,26 +153,26 @@
         (close-over *method* b))
       b)))
 
-#_(defn the-macro [sym]
+(defn the-macro [nss sym env]
   (cond
     ;; local macros...
-    (and (symbol? sym) (reference-local sym))
+    (and (symbol? sym) (contains? env sym))
     nil
 
     (or (symbol? sym) (var? sym))
     (let [^Var v (if (var? sym)
                    sym
-                   (lookup-var sym false))]
+                   (lookup-var nss sym false))]
       (when (and v (.isMacro v))
-        (if (or (= (.ns v) *ns*)
+        (if (or (= (.ns v) nss)
                 (.isPublic v))
           v
           (throw (IllegalStateException.
                    (str "var: " v " is not public"))))))))
 
-(defn names-static-member? [^Symbol sym]
-  (and (.getNamespace sym)
-       (not (namespace-for sym))))
+(defn names-static-member? [nss ^Symbol sym]
+  (and (namespace sym)
+       (not (namespace-for nss sym))))
 
 (defn file->class-name [^String f]
   (symbol (str (-> f
@@ -284,3 +284,71 @@
       (string? tag)
       (symbol tag)
       :else nil)))
+
+;; macroexpand exists in clojure.core
+;; but just delegates to clojure.lang.Compiler
+
+(def *macroexpand-limit* 100)
+
+(def +specials+
+  #{'if 'let* 'loop* 'fn* 'recur 'case* '.
+    'var 'quote 'monitor-enter 'monitor-exit
+    'throw 'try 'catch 'finally
+    '&})
+
+(defn macroexpand1-impl
+  [nss env form]
+  (if-not (seq? form)
+    form
+    (let [op (first form)]
+      (if (contains? +specials+ op)
+        form
+        (if-let [v (the-macro nss op env)]
+          (apply v form env (next form))
+          (if-not (symbol? op)
+            form
+            (let [^String sname (name op)]
+              (cond
+                (= (.charAt sname 0) \.)
+                (if-not (next form)
+                  (throw (IllegalArgumentException.
+                           (str "Malformed member expression: " form
+                                ", expecting (.member target ...)")))
+                  (let [member (symbol (.substring sname 1))
+                        target (second form)
+                        target (if (maybe-class nss target false)
+                                 (with-meta
+                                   `(identity ~target)
+                                   {:tag Class})
+                                 target)]
+                    (with-meta
+                      `(~'. ~target ~member ~@(nnext form))
+                      (meta form))))
+
+                (names-static-member? nss op)
+                (let [target (symbol (namespace op))
+                      member (symbol (name op))
+                      c (maybe-class nss target false)]
+                  (if-not c form
+                    (with-meta
+                      `(~'. ~target ~member ~@(next form))
+                      (meta form))))
+
+                (.endsWith sname ".")
+                (with-meta
+                  `(~'new ~(symbol (.substring sname (dec (count sname))))
+                       ~@(next form))
+                  (meta form))
+
+                :else form))))))))
+
+(defn macroexpand-impl
+  [nss form]
+  (run [env (fetch-val :lexicals)]
+    (loop [f form n 0]
+      (let [fx (macroexpand1-impl nss env f)]
+        (if (identical? f fx)
+          f
+          (if (and *macroexpand-limit* (>= n *macroexpand-limit*))
+            (throw (Exception. (str "Runaway macroexpansion: " form)))
+            (recur fx (inc n))))))))

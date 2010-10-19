@@ -16,6 +16,7 @@
 (def gen nil)
 (def analyze nil)
 (def eval-toplevel nil)
+(def *debug-inspect* false)
 
 (defstruct context
            :loader
@@ -325,7 +326,7 @@
 (defmethod gen ::invalid
   [form]
   (throw (IllegalArgumentException.
-           (str "Invalid form " form))))
+           (str "gen: invalid form " form))))
 
 (defmulti eval-toplevel
   "Evaluate an analyzed top-level form"
@@ -500,23 +501,24 @@
 (derive ::number ::constant)
 (defmethod analyze ::number
   [x]
-  (if (or (instance? Long x)
-          (instance? Integer x)
-          (instance? Double x))
-    (fn [ctx]
-      (let [pos (:position ctx)
-            jt (:want-unboxed ctx)]
-        (if (or (= jt (unboxed-type (class x)))
-                (true? jt))
-          [{::etype ::number
-            :java-type (unboxed-type (class x))
-            :position pos
-            :orig (if (instance? Integer x) (long x) x)} ctx]
-          ((register-constant x) ctx))))
-    (register-constant x)))
+  (let [x (if (instance? Integer x) (long x) x)]
+    (if (or (instance? Long x)
+            (instance? Double x))
+      (fn [ctx]
+        (let [pos (:position ctx)
+              jt (:want-unboxed ctx)]
+          (if (or (= jt (unboxed-type (class x)))
+                  (true? jt))
+            [{::etype ::number
+              :java-type (unboxed-type (class x))
+              :position pos
+              :orig x} ctx]
+            ((register-constant x) ctx))))
+      (register-constant x))))
 
 (defmethod gen ::number
   [{:keys [position orig]}]
+  ;; Only long and double arithmetic supported
   `([:ldc2-w ~orig]
     ~@(maybe-pop position)))
 
@@ -549,11 +551,26 @@
     (= jt Double/TYPE) :dreturn
     :else :areturn))
 
+;; using :iconst-0 :istore
+;; instead of :aconst-null :astore
+;; This way the bytecode verifier will catch too aggressive locals clearing
+(defn maybe-clear-local
+  "Generate bytecode to clear a local binding after use"
+  [{:keys [kind java-type unbox-type label live]}]
+  (cond
+    (or (is-primitive? java-type) (is-primitive? unbox-type))
+    nil
+    (= kind :closed) nil
+    ; (this?) nil
+    @live nil
+    :else (list [:iconst-0] [:istore label])))
+
 (defmethod gen ::local-binding
-  [{:keys [kind position java-type unbox-type place label]}]
-  `(~(if (= kind :closed)
-       [:getfield [place label java-type]]
-       [(load-op (or unbox-type java-type)) label])
+  [{:keys [kind position java-type unbox-type place label] :as lb}]
+  `(~@(if (= kind :closed)
+        (list [:aload-0] [:getfield [place label java-type]])
+        (list [(load-op (or unbox-type java-type)) label]))
+    ~@(maybe-clear-local lb)
     ~@(when (and unbox-type (not (is-primitive? java-type)))
         (condp = unbox-type
           Long/TYPE
@@ -992,7 +1009,8 @@
      meth (m-map analyze-method meth)
      f current-object
      _ pop-frame
-     initargs (m-map resolve-lexical (map :symbol (vals (:closed-lexicals f))))]
+     ;; was: resolve-lexical
+     initargs (m-map analyze (map :symbol (vals (:closed-lexicals f))))]
     (loop [a (vec (repeat (inc +max-positional-arity+) nil))
            variadic nil
            remain meth]
@@ -1039,12 +1057,15 @@
 (defmethod gen ::fn
   [{:keys [class-name initargs position]}]
   `([:new ~class-name]
+    [:dup]
     ~@(apply concat
         (for [b initargs]
-          (gen (with-meta b {::etype ::local-binding :position :expression}))))
+          (gen b)))
     [:invokespecial ~[class-name '<init>
                       [:method :void (map :java-type initargs)]]]
     ~@(maybe-pop position)))
+
+;(gen (assoc b ::etype ::local-binding :position :expression))
 
 (defmethod eval-toplevel ::fn
   [{:keys [class-name initargs]} loader]
@@ -1244,6 +1265,13 @@
 
 (defn gen-constant [c]
   (cond
+    (instance? Long c)
+    `([:ldc2-w ~c]
+      [:invokestatic ~[Long 'valueOf [:method Long [:long]]]])
+    (instance? Double c)
+    `([:ldc2-w ~c]
+      [:invokestatic ~[double 'valueOf [:method Double [:double]]]])
+
     (class? c)
     (if (.isPrimitive ^Class c)
       (cond
@@ -1377,7 +1405,8 @@
         (try
           (println "Loading class" (:name obj))
           (.defineClass loader (str (:name obj)) arr nil)
-          (inspect-tree (bin/read-binary ::asm/ClassFile bytecode))
+          (when *debug-inspect*
+            (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))
           (catch Throwable e
             (println "Caught" (class e) e)))))
     loader))

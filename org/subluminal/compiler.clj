@@ -433,6 +433,12 @@
          [:getstatic [Boolean 'FALSE Boolean]])
       ~@(maybe-pop position))))
 
+;;;; String literals
+
+(defmethod analyze ::string
+  [^String form]
+  (register-constant (.intern form)))
+
 ;;;; Keywords, symbols, vars
 
 (derive ::keyword ::constant)

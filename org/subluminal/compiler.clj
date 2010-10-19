@@ -627,6 +627,32 @@
     ;; TODO metadata
     res))
 
+(defmethod analyze ::set
+  [elts]
+  (run [pos (set-val :position :expression)
+        elts (m-map analyze elts)
+        _ (set-val :position pos)
+        res (if (every? #(isa? (::etype %) ::constant) elts)
+              (register-constant (set (map :orig elts)))
+              (m-result {::etype ::set
+                         :elements elts
+                         :java-class IPersistentSet
+                         :position pos}))]
+       res))
+
+(defmethod analyze ::map
+  [entries]
+  (run [pos (set-val :position :expression)
+        entries (m-map analyze (flatten (seq entries)))
+        _ (set-val :position pos)
+        res (if (every? #(isa? (::etype %) ::constant) entries)
+              (register-constant (apply array-map (map :orig entries)))
+              (m-result {::etype ::map
+                         :entries entries
+                         :java-class IPersistentMap
+                         :position pos}))]
+       res))
+
 (defn gen-array [objects]
   `([:ldc ~(int (count objects))]
     [:anewarray ~Object]
@@ -655,9 +681,31 @@
      ~[RT 'vector [:method IPersistentVector [[:array Object]]]]]
     ~@(maybe-pop position)))
 
+(defmethod gen ::set
+  [{:keys [elements position]}]
+  `(~@(gen-array elements)
+    [:invokestatic
+     ~[RT 'set [:method IPersistentSet [[:array Object]]]]]
+    ~@(maybe-pop position)))
+
+(defmethod gen ::map
+  [{:keys [entries position]}]
+  `(~@(gen-array entries)
+    [:invokestatic
+     ~[RT 'map [:method IPersistentMap [[:array Object]]]]]
+    ~@(maybe-pop position)))
+
 (defmethod eval-toplevel ::vector
   [{:keys [components]} loader]
   (into [] (map #(eval-toplevel % loader) components)))
+
+(defmethod eval-toplevel ::set
+  [{:keys [elements]} loader]
+  (into #{} (map #(eval-toplevel % loader) elements)))
+
+(defmethod eval-toplevel ::map
+  [{:keys [entries]} loader]
+  (apply hash-map (map #(eval-toplevel % loader) entries)))
 
 ;;;; synchronization
 
@@ -1331,6 +1379,16 @@
     `([:ldc ~(str (.name (.ns c)))]
       [:ldc ~(str (.sym c))]
       [:invokestatic ~[RT 'var [:method Var [String String]]]])
+
+    (set? c) 
+    `(~@(gen-constant-array c)
+      [:invokestatic
+       ~[RT 'set [:method IPersistentSet [[:array Object]]]]])
+
+    (map? c)
+    `(~@(gen-constant-array (flatten (seq c)))
+      [:invokestatic
+       ~[RT 'map [:method IPersistentMap [[:array Object]]]]])
 
     (vector? c)
     `(~@(gen-constant-array c)

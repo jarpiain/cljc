@@ -119,7 +119,6 @@
           name-part (symbol (name sym))
           ns-for (or (.lookupAlias rel-ns ns-part)
                      (Namespace/find ns-part))]
-      (println "ns-for" ns-for)
       (when ns-for
         (if (and intern? (= ns-for rel-ns))
           (intern ns-for name-part))

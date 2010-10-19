@@ -119,6 +119,7 @@
                 :parent ctx
                 :method tag
                 :loop-label (:loop-label m)
+                :catching nil
                 :clear-tag ct
                 :clear-path ctx
                 :clear-root ct
@@ -283,18 +284,6 @@
     (if-let [b (get (:lexicals ctx) sym)]
       ((close-over b) ctx)
       [nil ctx])))
-
-#_(defn unify-loop [types]
-  (fn updater [ctx]
-    (if (#{:loop :fn} (:kind ctx))
-      (assoc ctx :loop-locals
-             (map #(assoc %1 :java-type %2)
-                  (:loop-locals ctx)
-                  types))
-      (let [parent (updater (:parent ctx))]
-        (assoc ctx
-               :parent parent
-               :loop-locals (:loop-locals parent))))))
 
 (load "cljc/util")
 
@@ -875,6 +864,13 @@
 
 ;;;;
 
+(defn- analyze-with-type [[form typ]]
+  (let [f (analyze form)]
+    (fn [ctx]
+      (-> ctx
+        (assoc :want-unboxed (if (is-primitive? typ) typ nil))
+        f))))
+
 (defmethod analyze [::special 'recur]
   [[_ & inits :as form]]
   (fn [{:keys [position loop-locals loop-label catching] :as ctx}]
@@ -892,35 +888,50 @@
                 (count inits))))
 
       :valid
-      (let [[inits ctx]
+      (let [[inits ctx]            
             (run-with ctx
               [_ (set-val :want-unboxed true)
-               is (m-map analyze inits)]
+               is (m-map analyze-with-type
+                         (map vector inits (map :java-type loop-locals)))]
               is)]
         [{::etype ::recur
           :position position ; redundant
-          :inits inits
+          :inits (doall inits)
           :loop-label loop-label
           :loop-locals loop-locals}         
          ctx]))))
+
+(defn- coerce-primitive [prim]
+  (condp = prim
+    Long/TYPE
+    `([:checkcast ~Number]
+      [:invokevirtual ~[Number 'longValue [:method :long []]]])
+    Integer/TYPE
+    `([:checkcast ~Number]
+      [:invokevirtual ~[Number 'intValue [:method :int []]]])
+    Double/TYPE
+    `([:checkcast ~Number]
+      [:invokevirtual ~[Number 'doubleValue [:method :double []]]])))
 
 (defmethod gen ::recur
   [{:keys [inits loop-label loop-locals]}]
   `(~@(mapcat (fn [i lb]
                 (let [have-type (:java-type i)
-                      need-type (:java-type lb)
-                      doinit (cond
-                               (= have-type need-type)
-                               (gen i)
-                               :else
-                               (do (println "have type" have-type
-                                            "need type" need-type)
-                                 nil))]
-                  `(~@doinit
-                    ~[(store-op need-type) (:label lb)])))
+                      need-type (:java-type lb)]
+                  (cond
+                    (= have-type need-type)
+                    (gen i)
+                    (is-primitive? need-type)
+                    (concat
+                      (gen i)
+                      (coerce-primitive need-type))
+                    :else
+                    `(~@(gen i)
+                      [:checkcast ~need-type]))))
               inits loop-locals)
+    ~@(map (fn [lb] [(store-op (:java-type lb)) (:label lb)])
+           (reverse loop-locals))
     [:goto ~loop-label]))
-
 ;;;; Sequencing
 
 (defmethod analyze [::special 'do]
@@ -1069,7 +1080,7 @@
   [form]
   (analyze-loop form false))
 
-(defmethod analyze [::special 'loop]
+(defmethod analyze [::special 'loop*]
   [form]
   (analyze-loop form true))
 
@@ -1546,10 +1557,11 @@
         (.clear bytecode)
         (try
           (.defineClass loader (str (:name obj)) arr nil)
-          (when *debug-inspect*
-            (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))
           (catch Throwable e
-            (println "Caught while loading class:" (class e) e)))))
+            (println "Caught while loading class:" (class e) e))
+          (finally
+            (when *debug-inspect*
+              (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))))))
     loader))
 
 ;;;; toplevel

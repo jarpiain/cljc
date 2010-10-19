@@ -14,6 +14,7 @@
 
 (def gen nil)
 (def analyze nil)
+(def eval-toplevel nil)
 
 (defstruct context
            :loader
@@ -292,9 +293,6 @@
 
 (load "cljc/util")
 
-(defn etype [x]
-  (::etype (meta x)))
-
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
   [x]
@@ -323,11 +321,18 @@
   "Generate bytecode from an analyzed form"
   ::etype :default ::invalid)
 
-(defmulti gen-unboxed
-  etype :default ::invalid)
+(defmethod gen ::invalid
+  [form]
+  (throw (IllegalArgumentException.
+           (str "Invalid form " form))))
 
-(defmulti java-class ::etype)
-(defmulti literal-val ::etype)
+(defmulti eval-toplevel
+  "Evaluate an analyzed top-level form"
+  (fn [form loader] (::etype form)))
+
+(defmethod eval-toplevel :default
+  [form loader]
+  (throw (Exception. (str "Can't eval " (::etype form) " form"))))
 
 ;; nil represents the null type (assignable to all reference types)
 (defn has-java-class? [f]
@@ -362,14 +367,11 @@
             _ pop-frame]
            a)]
      res)))
+
 (defn teg "Test gen"
   ([form] (gen (tea form)))
   ([form pos] (gen (tea form pos))))
 
-(defmethod gen ::invalid
-  [form]
-  (throw (IllegalArgumentException.
-           (str "Invalid form " form))))
 
 ;;;; nil
 
@@ -390,12 +392,8 @@
   `([:aconst-null]
     ~@(maybe-pop (:position form))))
 
-#_(defmethod java-class ::null
-  [_]
-  nil)
-
-(defmethod literal-val [::null]
-  [_]
+(defmethod eval-toplevel ::null
+  [form loader]
   nil)
 
 ;;;; boolean literals
@@ -404,7 +402,7 @@
   [form]
   (fn [{:keys [want-unboxed] :as ctx}]
     [{::etype ::boolean
-      :val form
+      :orig form
       :java-type (if (= want-unboxed Boolean/TYPE)
                    Boolean/TYPE
                    Boolean)
@@ -412,29 +410,27 @@
      ctx]))
 
 (defmethod gen ::boolean
-  [{:keys [val position] :as form}]
+  [{:keys [orig position] :as form}]
   (if (can-emit-unboxed? form)
-    `(~(if val
+    `(~(if orig
          [:iconst-1]
          [:iconst-0])
       ~@(maybe-pop position))
-    `(~(if val
+    `(~(if orig
          [:getstatic [Boolean 'TRUE Boolean]]
          [:getstatic [Boolean 'FALSE Boolean]])
       ~@(maybe-pop position))))
 
-(defmethod java-class ::boolean
-  [_]
-  Boolean)
-
-(defmethod literal-val ::boolean
-  [[form]]
-  form)
-
-;;;; Keyword
+;;;; Keywords, symbols, vars
 
 (derive ::keyword ::constant)
 (derive ::var ::constant)
+(derive ::the-var ::constant)
+(derive ::boolean ::constant)
+
+(defmethod eval-toplevel ::constant
+  [{:keys [orig]} loader]
+  orig)
 
 (defmethod analyze ::keyword
   [kw]
@@ -467,6 +463,25 @@
       ::var bind
       ::constant bind)))
 
+(defmethod eval-toplevel ::var
+  [{:keys [orig]} loader]
+  (deref orig))
+
+(defmethod gen ::var
+  [{:keys [position val obj]}]
+  `([:getstatic [~obj ~val ~Var]]
+    [:invokevirtual ~[Var 'get [:method Object []]]]
+    ~@(maybe-pop position)))
+
+(defmethod analyze [::special 'var]
+  [[_ vname :as form]]
+  (let [v (lookup-var *ns* vname false)]
+    (if v
+      (run [cv (register-var v)]
+        (assoc cv ::etype ::the-var))
+      (throw (Exception. (str "Unable to resolve var: " vname
+                              " in this context"))))))
+
 ;;;; Number
 
 (defn unboxed-type [^Class c]
@@ -489,13 +504,13 @@
           [{::etype ::number
             :java-type (unboxed-type (class x))
             :position pos
-            :val x} ctx]
+            :orig x} ctx]
           ((register-constant x) ctx))))
     (register-constant x)))
 
 (defmethod gen ::number
-  [{:keys [position val]}]
-  `([:ldc ~val]
+  [{:keys [position orig]}]
+  `([:ldc ~orig]
     ~@(maybe-pop position)))
 
 ;;;; Other constants

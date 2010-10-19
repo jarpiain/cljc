@@ -73,9 +73,8 @@
 ;; 3. throw "no such namespace"
 (defn resolve-qualified [^Namespace rel-ns sym]
   (let [ns-part (symbol (namespace sym))
-        ns-for (.lookupAlias rel-ns ns-part)
-        ns-for (if ns-for ns-for
-                 (Namespace/find ns-part))]
+        ns-for (or (.lookupAlias rel-ns ns-part)
+                   (Namespace/find ns-part))]
     (if ns-for
       (let [v (.findInternedVar ns-for (symbol (name sym)))]
         (cond
@@ -99,6 +98,7 @@
     (resolve-qualified n sym)
     (resolve-unqualified n sym)))
 
+;; used in (analyze ::symbol)
 (defn lookup-sym [n sym]
   (let [o (resolve-sym n sym)]
     (cond
@@ -110,6 +110,33 @@
       (register-constant o)
       :else
       (m-result {::etype ::static-field}))))
+
+;; used in (def sym ...) and (var sym)
+(defn lookup-var [rel-ns sym intern?]
+  (cond
+    (namespace sym)
+    (let [ns-part (symbol (namespace sym))
+          name-part (symbol (name sym))
+          ns-for (or (.lookupAlias rel-ns ns-part)
+                     (Namespace/find ns-part))]
+      (println "ns-for" ns-for)
+      (when ns-for
+        (if (and intern? (= ns-for rel-ns))
+          (intern ns-for name-part))
+          (.findInternedVar ns-for name-part)))
+    (= sym 'ns)
+    #'clojure.core/ns
+    (= sym 'in-ns)
+    #'clojure.core/in-ns
+    :else
+    (let [o (.getMapping rel-ns sym)]
+      (if o
+        (if (instance? Var o)
+          o
+          (throw (Exception. (str "Expecting var, but sym: " sym
+                                  " is mapped to " o))))
+        (when intern?
+          (intern rel-ns sym))))))
 
 #_(defn close-over [binding method]
   (when (and binding method

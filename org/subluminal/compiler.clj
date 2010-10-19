@@ -72,7 +72,7 @@
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [c (get (:constant-ids curr-obj) obj)]
-        [c ctx]
+        [(assoc c :position (:position ctx)) ctx]
         (let [c {::etype ::constant
                  :position (:position ctx)
                  :val (gensym "const__")
@@ -91,7 +91,7 @@
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [prev (get (:keywords curr-obj) kw)]
-        [prev ctx]
+        [(assoc prev :position (:position ctx)) ctx]
         (let [[c ctx] ((register-constant kw) ctx)
               k (assoc c ::etype ::keyword)]
           [k (update-in ctx [:index (:fn ctx) :keywords]
@@ -101,7 +101,7 @@
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [prev (get (:vars curr-obj) v)]
-        [prev ctx]
+        [(assoc prev :position (:position ctx)) ctx]
         (let [[c ctx] ((register-constant v) ctx)
               vv (assoc c ::etype ::var)]
           [vv (update-in ctx [:index (:fn ctx) :vars]

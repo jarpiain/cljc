@@ -1825,7 +1825,7 @@
         ; calculate argument count including 'this'
         :invokeinterface
         (let [[idx] args
-              iface-args (mdesc-args orig)]
+              iface-args (mdesc-args (first orig))]
           (struct instruction op
                   [idx (->> iface-args
                          (map sizeof-desc)

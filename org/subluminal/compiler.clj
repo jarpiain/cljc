@@ -2,6 +2,7 @@
   (:import (java.io Reader)
            (java.nio ByteBuffer)
            (java.util IdentityHashMap)
+           (java.lang.reflect Field Method Constructor)
            (clojure.lang LineNumberingPushbackReader
                          DynamicClassLoader Reflector
                          LazySeq IPersistentMap IObj
@@ -358,9 +359,10 @@
 
 (defn tea "Test analysis"
   ([form] (tea form :expression))
-  ([form pos]
+  ([form pos] (tea form pos (agent (DynamicClassLoader.))))
+  ([form pos loader]
    (let [[res ctx]
-         (run-with (assoc null-context :loader (agent (DynamicClassLoader.)))
+         (run-with (assoc null-context :loader loader)
            [_ (push-object-frame {:name 'toplevel})
             _ (set-val :position pos)
             a (analyze form)
@@ -372,6 +374,11 @@
   ([form] (gen (tea form)))
   ([form pos] (gen (tea form pos))))
 
+(defn tee 
+  "Test eval-toplevel"
+  [form]
+  (let [ldr (agent (DynamicClassLoader.))]
+    (eval-toplevel (tea form :eval ldr) ldr)))
 
 ;;;; nil
 
@@ -504,13 +511,13 @@
           [{::etype ::number
             :java-type (unboxed-type (class x))
             :position pos
-            :orig x} ctx]
+            :orig (if (instance? Integer x) (long x) x)} ctx]
           ((register-constant x) ctx))))
     (register-constant x)))
 
 (defmethod gen ::number
   [{:keys [position orig]}]
-  `([:ldc ~orig]
+  `([:ldc2-w ~orig]
     ~@(maybe-pop position)))
 
 ;;;; Other constants
@@ -622,6 +629,12 @@
                                                           (repeat Object))]]]
     ~@(maybe-pop position)))
 
+(defmethod eval-toplevel ::invocation
+  [{:keys [op args]} loader]
+  (let [eop (eval-toplevel op loader)
+        eargs (doall (map #(eval-toplevel % loader) args))]
+    (apply eop eargs)))
+
 ;;;; Assignment
 
 (defmethod analyze [::special 'set!]
@@ -714,6 +727,11 @@
 (defmethod gen ::do
   [{:keys [body]}]
   (mapcat gen body))
+
+(defmethod eval-toplevel ::do
+  [{:keys [body]} loader]
+  (dorun (map #(eval-toplevel % loader) (butlast body)))
+  (eval-toplevel (last body) loader))
 
 ;;;; Conditional
 
@@ -816,6 +834,13 @@
           ~@coerce-right
           [:label ~endl])))))
 
+(defmethod eval-toplevel ::if
+  [{:keys [test then else]} loader]
+  (let [stat (eval-toplevel test loader)]
+    (if stat
+      (eval-toplevel then loader)
+      (eval-toplevel else loader))))
+
 ;;;; Let & loop
 
 (declare analyze-loop)
@@ -886,7 +911,7 @@
       [pos (fetch-val :position)
        r (if (or (= pos :eval)
                  (and loop? (= pos :expression)))
-           (analyze `(fn* [] ~form))
+           (analyze `((fn* [] ~form)))
            (analyze-loop0 bindings body loop?))]
       r)))
 
@@ -1020,6 +1045,15 @@
     [:invokespecial ~[class-name '<init>
                       [:method :void (map :java-type initargs)]]]
     ~@(maybe-pop position)))
+
+(defmethod eval-toplevel ::fn
+  [{:keys [class-name initargs]} loader]
+  (await loader)ClassLoader
+  (let [^Class c (.loadClass @loader (str class-name))
+        eargs (doall (map #(eval-toplevel % loader) initargs))
+        ^Constructor ctor
+        (.getConstructor c (into-array Class (map :java-type initargs)))]
+    (.newInstance ctor (into-array Object eargs))))
 
 (defn process-fn*-args [argv static?]
   (loop [req-params [] rest-param nil state :req remain argv]
@@ -1225,12 +1259,16 @@
         [:invokestatic ~[Class 'forName [:method Class [String]]]]))
 
     (symbol? c)
-    `([:ldc ~(namespace c)]
+    `(~(if (namespace c)
+         [:ldc (namespace c)]
+         [:aconst-null])
       [:ldc ~(name c)]
       [:invokestatic ~[Symbol 'create [:method Symbol [String String]]]])
 
     (keyword? c)
-    `([:ldc ~(namespace c)]
+    `(~(if (namespace c)
+         [:ldc (namespace c)]
+         [:aconst-null])
       [:ldc ~(name c)]
       [:invokestatic ~[Keyword 'intern [:method Keyword [String String]]]])
 

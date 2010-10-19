@@ -8,7 +8,7 @@
                (find-ns nssym))]
      n)))
 
-(defn- lookup-var0 [sym intern?]
+#_(defn- lookup-var0 [sym intern?]
   (cond
     (namespace sym)
     (when-let [symns (namespace-for sym)]
@@ -137,21 +137,6 @@
                                   " is mapped to " o))))
         (when intern?
           (intern rel-ns sym))))))
-
-#_(defn close-over [binding method]
-  (when (and binding method
-             (not (contains? (:locals method) binding)))
-    (dosync
-      (alter method update-in [:closes] assoc binding binding))
-    (close-over binding (:parent method))))
-
-#_(defn reference-local [sym]
-  (if-not (bound? #'*local-env*)
-    nil
-    (let [b (get *local-env* sym)]
-      (when b
-        (close-over *method* b))
-      b)))
 
 (defn the-macro [nss sym env]
   (cond
@@ -285,16 +270,19 @@
       (symbol tag)
       :else nil)))
 
+;; Macro expansion.
 ;; macroexpand exists in clojure.core
 ;; but just delegates to clojure.lang.Compiler
 
 (def *macroexpand-limit* 100)
 
 (def +specials+
-  #{'if 'let* 'loop* 'fn* 'recur 'case* '.
-    'var 'quote 'monitor-enter 'monitor-exit
-    'throw 'try 'catch 'finally
-    '&})
+  #{'if 'let* 'loop* 'fn* 'recur
+    'var 'monitor-enter 'monitor-exit
+    'clojure.core/import*
+    ;; TODO:
+    'throw 'try 'catch 'finally 'quote 'case* '.
+    'def 'letfn* 'set! 'deftype* 'reify* 'new '&})
 
 (defn macroexpand1-impl
   [nss env form]
@@ -308,6 +296,7 @@
           (if-not (symbol? op)
             form
             (let [^String sname (name op)]
+              ;; For some reason accepts symbols with arbitrary ns part
               (cond
                 (= (.charAt sname 0) \.)
                 (if-not (next form)

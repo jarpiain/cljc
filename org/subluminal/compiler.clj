@@ -4,9 +4,12 @@
            (java.util IdentityHashMap)
            (java.lang.reflect Field Method Constructor)
            (clojure.lang LineNumberingPushbackReader
-                         DynamicClassLoader Reflector
-                         LazySeq IPersistentMap IObj
+                         DynamicClassLoader Reflector LazySeq IObj
                          RestFn AFunction Namespace
+                         IPersistentList IPersistentVector
+                         IPersistentMap IPersistentSet
+                         PersistentList PersistentList$EmptyList
+                         PersistentVector PersistentArrayMap PersistentHashSet
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
         (clojure inspector)
@@ -578,6 +581,34 @@
           `([:invokestatic ~[Long 'valueOf [:method Long [:long]]]])
           Double/TYPE
           `([:invokestatic ~[Double 'valueOf [:method Double [:double]]]])))
+    ~@(maybe-pop position)))
+
+;;;; Empty collections
+
+(derive ::empty ::constant)
+
+(defmethod analyze ::empty
+  [coll]
+  ;; TODO metadata...
+  (run [pos (fetch-val :position)]
+    {::etype ::empty
+     :java-class (class coll)
+     :position pos
+     :orig coll}))
+
+(defmethod gen ::empty
+  [{:keys [orig position]}]
+  `(~(cond
+       (instance? IPersistentList orig)
+       [:getstatic [PersistentList 'EMPTY PersistentList$EmptyList]]
+       (instance? IPersistentVector orig)
+       [:getstatic [PersistentVector 'EMPTY PersistentVector]]
+       (instance? IPersistentMap orig)
+       [:getstatic [PersistentArrayMap 'EMPTY PersistentArrayMap]]
+       (instance? IPersistentSet orig)
+       [:getstatic [PersistentHashSet 'EMPTY PersistentHashSet]]
+       :else (throw (UnsupportedOperationException.
+                       "Unknown collection type")))
     ~@(maybe-pop position)))
 
 ;;;; synchronization

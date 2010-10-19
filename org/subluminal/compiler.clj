@@ -1,7 +1,7 @@
 (ns org.subluminal.compiler
   (:import (java.io Reader)
            (java.nio ByteBuffer)
-           (java.util IdentityHashMap)
+           (java.util IdentityHashMap Arrays List)
            (java.lang.reflect Field Method Constructor)
            (clojure.lang LineNumberingPushbackReader
                          DynamicClassLoader Reflector LazySeq IObj
@@ -554,6 +554,10 @@
     (= jt Long/TYPE) :lreturn
     (= jt Double/TYPE) :dreturn
     :else :areturn))
+
+(defmethod analyze [::special 'quote]
+  [[_ obj]]
+  (register-constant obj))
 
 ;; using :iconst-0 :istore
 ;; instead of :aconst-null :astore
@@ -1340,12 +1344,23 @@
   at class initialization time"
   [c]
   (cond
+    (nil? c)
+    `([:aconst-null])
+    (instance? Boolean c)
+    (if c
+      `([:getstatic ~[Boolean 'TRUE Boolean]])
+      `([:getstatic ~[Boolean 'FALSE Boolean]]))
+    (instance? Integer c)
+    `([:ldc ~c]
+      [:invokestatic ~[Integer 'valueOf [:method Integer [:int]]]])
     (instance? Long c)
     `([:ldc2-w ~c]
       [:invokestatic ~[Long 'valueOf [:method Long [:long]]]])
     (instance? Double c)
     `([:ldc2-w ~c]
       [:invokestatic ~[double 'valueOf [:method Double [:double]]]])
+    (string? c)
+    `([:ldc ~c])
 
     (class? c)
     (if (.isPrimitive ^Class c)
@@ -1389,6 +1404,13 @@
     `(~@(gen-constant-array (flatten (seq c)))
       [:invokestatic
        ~[RT 'map [:method IPersistentMap [[:array Object]]]]])
+
+    (or (seq? c) (list? c))
+    `(~@(gen-constant-array c)
+      [:invokestatic
+       ~[Arrays 'asList [:method List [[:array Object]]]]]
+      [:invokestatic
+       ~[PersistentList 'create [:method IPersistentList [List]]]])
 
     (vector? c)
     `(~@(gen-constant-array c)

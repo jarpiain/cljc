@@ -1227,29 +1227,31 @@
         _ pop-frame
         _ (set-val :want-unboxed true)
         initargs (m-map analyze (map :symbol (vals (:closed-lexicals f))))]
-    (when-let [[info _] (meth +variadic-index+)]
-      (let [variadic-arity (arity info)]
-        (when (some identity (subvec meth (inc variadic-arity)
-                                          +variadic-index+))
-          (throw (Exception.
-                   (str "Can't have fixed arity function"
-                        " with more params than variadic function"))))))
-    (when (and (:static? f)
-               (not (empty? (:closed-lexicals f))))
-      (throw (Exception. "Static fns can't be closures")))
-    ;; TODO: add metadata from original form
-    (let [obj (assoc f :methods (filter identity meth))]
-      ;(compile-class @classloader obj (if variadic RestFn AFunction) [])
-      (send classloader (bound-fn [& args] (apply compile-class args))
-            obj (if (meth +variadic-index+) RestFn AFunction) [])
-      (try
-        (await-for 1000 classloader)
-        (if-let [e (agent-error classloader)]
-          (throw e)))
-      {::etype ::fn
-       :class-name (:name obj)
-       :initargs initargs
-       :position pos})))
+    (let [[variadic-info _] (meth +variadic-index+)
+          variadic-arity (when variadic-info (arity variadic-info))]
+      (when (and variadic-info
+                 (some identity (subvec meth (inc variadic-arity)
+                                        +variadic-index+)))
+        (throw (Exception.
+                 (str "Can't have fixed arity function"
+                      " with more params than variadic function"))))
+      (when (and (:static? f)
+                 (not (empty? (:closed-lexicals f))))
+        (throw (Exception. "Static fns can't be closures")))
+      ;; TODO: add metadata from original form
+      (let [obj (assoc f :methods (filter identity meth)
+                         :variadic-arity variadic-arity)]
+        ;(compile-class @classloader obj (if variadic RestFn AFunction) [])
+        (send classloader (bound-fn [& args] (apply compile-class args))
+              obj (if (meth +variadic-index+) RestFn AFunction) [])
+        (try
+          (await-for 1000 classloader)
+          (if-let [e (agent-error classloader)]
+            (throw e)))
+        {::etype ::fn
+         :class-name (:name obj)
+         :initargs initargs
+         :position pos}))))
 
 (defmethod gen ::fn
   [{:keys [class-name initargs position]}]
@@ -1442,11 +1444,21 @@
         [:putstatic [~obj ~val ~java-type]]))))
 
 ;; TODO: defmulti --> deftypes also
-(defn emit-methods [obj cref]
+(defn emit-methods [{:keys [variadic-arity] :as obj} cref]
+  (when variadic-arity
+    (let [mref (asm/add-method cref
+                 {:name 'getRequiredArity
+                  :descriptor [:method :int []]
+                  :flags #{:public}})]
+      (asm/emit cref mref
+        `([:ldc ~(int variadic-arity)]
+          [:ireturn]))
+      (asm/assemble-method mref)))
   (doseq [[info body :as mm] (:methods obj)]
-    (let [{:keys [argv bind this loop-label]} info] 
+    (let [{:keys [argv bind this loop-label]} info
+          variadic? (variadic? argv)]
       (let [mref (asm/add-method cref
-                   {:name 'invoke
+                   {:name (if variadic? 'doInvoke 'invoke)
                     :descriptor [:method Object
                                  (repeat (count bind) Object)]
                     :params (map :label bind)
@@ -1489,6 +1501,7 @@
           clos-names (keys clos)
           clos-types (map :java-type (vals clos))]
       ;; ctor that takes closed-overs and inits base + fields
+      ;; TODO: ctors that take metadata, deftype ctors
       (let [init (asm/add-method c {:name '<init>
                                     :descriptor [:method :void clos-types]
                                     :params clos-names

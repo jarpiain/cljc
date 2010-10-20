@@ -454,7 +454,8 @@
 (defmethod analyze ::symbol
   [sym]
   (run
-    [unbox-type (fetch-val :want-unboxed)
+    [_ (m-result (println "Sym to analyze:" sym))
+     unbox-type (fetch-val :want-unboxed)
      lex (resolve-lexical sym)
      pos (fetch-val :position)
      bind (if lex
@@ -473,7 +474,8 @@
           :else res))
 
       ::static-field
-      (throw (Exception. "static-field is unimplemented"))
+      (assoc bind :position pos
+                  :tag (tag-of sym))
 
       ::var bind
       ::constant bind)))
@@ -650,7 +652,7 @@
 (defmethod analyze ::map
   [entries]
   (run [pos (set-val :position :expression)
-        entries (m-map analyze (flatten (seq entries)))
+        entries (m-map analyze (apply concat (seq entries)))
         _ (set-val :position pos)
         res (if (every? #(isa? (::etype %) ::constant) entries)
               (register-constant (apply array-map (map :orig entries)))
@@ -1121,31 +1123,36 @@
   (if (< (count form) 3)
     (throw (IllegalArgumentException.
              "Malformed member expression, expecting (. target member ...)"))
-    (let [^Class c (maybe-class *ns* target false)
+    (let [memb (if (seq? member) (first member) member)
+          argl (if (seq? member) (next member) args)
+          ^Class c (maybe-class *ns* target false)
           field? (and (= (count form) 3)
                       (or (symbol? member) (keyword? member)))]
+      (when (or (not (symbol? memb))
+                (and (seq? member) (seq args)))
+        (throw (Exception. "Malformed member expression")))
       (run [pos (update-val :position #(if (= % :eval) :eval :expression))
             unboxed? (set-val :want-unboxed nil)
             inst (if c (m-result nil) (analyze target))
             field? (m-result
-                     (if (and field? (not (keyword? member)))
+                     (if (and field? (not (keyword? memb)))
                        (if c
                          (empty? (Reflector/getMethods
-                                   c 0 (munge-impl (name member)) true))
+                                   c 0 (munge-impl (name memb)) true))
                          (if (and inst (:java-type inst)
                                   (not (.isPrimitive (:java-type inst))))
                            (empty? (Reflector/getMethods
                                      (:java-type inst) 0
-                                     (munge-impl (name member)) false))
+                                     (munge-impl (name memb)) false))
                            field?))
                        field?))
             _ (set-val :want-unboxed true)
-            args (m-map analyze args)
+            argl (m-map analyze argl)
             _ (set-val :position pos)]
         (assoc
           (if field?
-            (analyze-field form c inst member unboxed?)
-            (analyze-java-method form c inst member args unboxed?))
+            (analyze-field form c inst memb unboxed?)
+            (analyze-java-method form c inst memb argl unboxed?))
           :position pos)))))
 
 ;;;; fn invocation
@@ -1153,7 +1160,9 @@
 (defmethod analyze ::invocation
   [[op & args :as form]]
   (run
-    [me (macroexpand-impl *ns* form)
+    [_ (m-result (println "EXP>>" form))
+     me (macroexpand-impl *ns* form)
+     _ (m-result (println ">>EXP" me))
      res (if-not (identical? me form)
            (analyze me)
            (run [pos (update-val :position #(if (= % :eval) :eval :expression))
@@ -1850,7 +1859,7 @@
        ~[RT 'set [:method IPersistentSet [[:array Object]]]]])
 
     (map? c)
-    `(~@(gen-constant-array (flatten (seq c)))
+    `(~@(gen-constant-array (apply concat (seq c)))
       [:invokestatic
        ~[RT 'map [:method IPersistentMap [[:array Object]]]]])
 

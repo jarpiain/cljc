@@ -59,8 +59,11 @@
         (if-let [f (Reflector/getField c (name sym) true)]
           ;; TODO: should be same as (. Class staticField)
           {::etype ::static-field
-           :class c
-           :fld f}
+           :target c
+           :member f
+           :java-type (.getType f)
+           :unbox-type (.getType f)
+           :tag nil}
           (throw (Exception. (str "Unable to find static field: " (name sym)
                                   " in " c))))
         (throw (Exception. (str "No such namespace: " ns-part)))))))
@@ -81,7 +84,7 @@
       (class? o)
       (register-constant o)
       :else
-      (m-result {::etype ::static-field}))))
+      (with-monad state-m (m-result o)))))
 
 ;; used in (def sym ...) and (var sym)
 (defn lookup-var [rel-ns sym intern?]
@@ -248,9 +251,9 @@
 (def +specials+
   #{'if 'let* 'loop* 'fn* 'recur 'quote
     'var 'def 'monitor-enter 'monitor-exit
-    'throw 'try 'catch 'finally 'new
+    'throw 'try 'catch 'finally 'new '.
     ;; TODO:
-    'clojure.core/import* 'case* '.
+    'clojure.core/import* 'case*
     'letfn* 'set! 'deftype* 'reify* '&})
 
 (defn macroexpand1-impl

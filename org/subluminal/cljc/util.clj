@@ -8,39 +8,10 @@
                (find-ns nssym))]
      n)))
 
-#_(defn- lookup-var0 [sym intern?]
-  (cond
-    (namespace sym)
-    (when-let [symns (namespace-for sym)]
-      (let [name-part (symbol (name sym))]
-        (if (and intern? (= symns *ns*))
-          (intern *ns* name-part)
-          (.findInternedVar symns name-part))))
-
-    (= sym 'ns)
-    #'clojure.core/ns
-
-    (= sym 'in-ns)
-    #'clojure.core/in-ns
-
-    :else
-    (let [o (.getMapping *ns* sym)]
-      (cond
-        (nil? o)
-        (when intern?
-          (intern *ns* (symbol (name sym))))
-
-        (var? o)
-        o
-
-        :else
-        (throw (Exception. (str "Expecting var, but " sym
-                                " is mapped to " o)))))))
-
 ;; Try to resolve (in order):
 ;; 1. fully.qualified.Class or [LArrayClass;
 ;;    -> Class object or ClassNotFoundException
-;; 2. always resolve the symbols 'ns' and 'in-ns' in namespace clojure.core
+;; 2. always resolve the symbols 'ns and 'in-ns in ns clojure.core
 ;; (2b. compiler-stub)
 ;; 3. ns-map of rel-ns
 ;;    -> interned Var, referred Var
@@ -86,9 +57,10 @@
           :else v))
       (if-let [^Class c (maybe-class rel-ns ns-part false)]
         (if-let [f (Reflector/getField c (name sym) true)]
+          ;; TODO: should be same as (. Class staticField)
           {::etype ::static-field
            :class c
-           :name (symbol (name sym))}
+           :fld f}
           (throw (Exception. (str "Unable to find static field: " (name sym)
                                   " in " c))))
         (throw (Exception. (str "No such namespace: " ns-part)))))))
@@ -276,10 +248,9 @@
 (def +specials+
   #{'if 'let* 'loop* 'fn* 'recur 'quote
     'var 'def 'monitor-enter 'monitor-exit
-    'throw 'new
+    'throw 'try 'catch 'finally 'new
     ;; TODO:
-    'clojure.core/import*
-    'try 'catch 'finally 'case* '.
+    'clojure.core/import* 'case* '.
     'letfn* 'set! 'deftype* 'reify* '&})
 
 (defn macroexpand1-impl

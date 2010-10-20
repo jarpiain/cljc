@@ -1,15 +1,18 @@
 (ns org.subluminal.compiler
-  (:import (java.io Reader)
+  (:refer-clojure :exclude [compile eval])
+  (:import (java.io Reader InputStreamReader)
            (java.nio ByteBuffer)
+           (java.nio.charset Charset)
            (java.util IdentityHashMap Arrays List)
            (java.lang.reflect Field Method Constructor)
            (clojure.lang LineNumberingPushbackReader
                          DynamicClassLoader Reflector LazySeq IObj
-                         RestFn AFunction Namespace
+                         RestFn AFunction Namespace Associative
                          IPersistentList IPersistentVector
                          IPersistentMap IPersistentSet
                          PersistentList PersistentList$EmptyList
-                         PersistentVector PersistentArrayMap PersistentHashSet
+                         PersistentVector PersistentArrayMap
+                         PersistentHashSet PersistentHashMap
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
         (clojure [inspector :only [inspect-tree]])
@@ -290,6 +293,7 @@
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
   [x]
+  ;(println "ZYNCAT" x)
   (let [x (if (instance? LazySeq x)
             (if-let [sx (seq x)] sx ())
             x)]
@@ -353,7 +357,7 @@
 
 (defn tea "Test analysis"
   ([form] (tea form :expression))
-  ([form pos] (tea form pos (agent (DynamicClassLoader.))))
+  ([form pos] (tea form pos (DynamicClassLoader.)))
   ([form pos loader]
    (let [[res ctx]
          (run-with (assoc null-context :loader loader)
@@ -371,7 +375,7 @@
 (defn tee 
   "Test eval-toplevel"
   [form]
-  (let [ldr (agent (DynamicClassLoader.))]
+  (let [ldr (DynamicClassLoader.)]
     (eval-toplevel (tea form :eval ldr) ldr)))
 
 ;;;; nil
@@ -1583,11 +1587,11 @@
       ;; TODO: add metadata from original form
       (let [obj (assoc f :methods (filter identity meth)
                          :variadic-arity variadic-arity)]
-        ;(compile-class @classloader obj (if variadic RestFn AFunction) [])
-        (send classloader (bound-fn [& args] (apply compile-class args))
-              obj (if (meth +variadic-index+) RestFn AFunction) [])
+        (compile-class classloader obj (if variadic-info RestFn AFunction) [])
+        (comment (send classloader (bound-fn [& args] (apply compile-class args))
+              obj (if (meth +variadic-index+) RestFn AFunction) []))
         (try
-          (await-for 1000 classloader)
+          ;(await-for 1000 classloader)
           (if-let [e (agent-error classloader)]
             (throw e)))
         {::etype ::fn
@@ -1612,8 +1616,8 @@
 
 (defmethod eval-toplevel ::fn
   [{:keys [class-name initargs]} loader]
-  (await loader)
-  (let [^Class c (.loadClass @loader (str class-name))
+;  (await loader)
+  (let [^Class c (.loadClass loader (str class-name))
         eargs (doall (map #(eval-toplevel % loader) initargs))
         ^Constructor ctor
         (.getConstructor c (into-array Class (map :java-type initargs)))]
@@ -1895,91 +1899,119 @@
 
 ;;;; toplevel
 
-(comment
+(defn form-seq [rd]
+  (let [eof (Object.)
+        pbr (if (instance? LineNumberingPushbackReader rd) rd
+              (LineNumberingPushbackReader. rd))
+        seqrd (fn seqrd [rd]
+                (lazy-seq
+                  (let [form (read rd nil eof)]
+                    (when-not (identical? form eof)
+                      (cons form (seqrd rd))))))]
+    (seqrd pbr)))
+
+(defn compile-file
   ([rd src-path src-name]
-  (binding [*source-path* src-path
-            *source-file* src-name
-            *method* nil
-            *local-env* {} ; symbol -> LocalBinding
-            *loop-locals* nil
-            *ns* *ns*
-            *constants* []
-            *constant-ids* {} ;; IdentityHashMap.
-            *keywords* {}
-            *vars* {}]
-    (assembling [ns-init {:name (file->class-name src-path)
-                          :flags #{:public :super}
-                          :source src-name}]
-      (let [loader (add-method ns-init {:name 'load
-                                        :descriptor [:method :void []]})
-            eof (Object.)]
-        (loop []
-          (let [form (read rd nil eof)]
-            (when-not (identical? form eof)
-              (emit ns-init loader (compile1 form))
-              (recur))))
-        (assemble-method m))
+   (asm/assembling [ns-init {:name (file->class-name src-path)
+                             :flags #{:public :super}
+                             :source src-name}]
+     (let [loader (DynamicClassLoader.)]
+       (run-with (assoc null-context :loader loader)
+         [_ (push-object-frame {:name 'toplevel})
+          _ (set-val :position :eval)
+          loader-code (m-map compile1 (form-seq rd))
+          context (set-state null-context)]
+         (let [clj-init (asm/add-method ns-init
+                                        {:name 'load
+                                         :descriptor [:method :void []]})]
+           (asm/emit ns-init clj-init
+                     (apply concat loader-code))
+           (asm/assemble-method clj-init))
 
-      (doseq [i (range (count (:constants @init-ns)))]
-        (add-field ns-init {:name (constant-name i)
-                            :flags #{:public :static :final}}))
+         (let [top (first (current-object context))]
+           (doseq [fld (:constants top)]
+             (let [{:keys [val java-type]} fld]
+               (asm/add-field ns-init {:name val
+                                 :descriptor java-type
+                                 :flags #{:public :final :static}})))
+           ;; TODO inits in blocks of 100...
+           (let [init-const (asm/add-method ns-init
+                                            {:name '__init0
+                                             :descriptor [:method :void []]
+                                             :flags #{:public :static}})]
+             (emit-constants top ns-init init-const)
+             (asm/emit1 ns-init init-const [:return])
+             (asm/assemble-method init-const))
 
-      ;; TODO inits in blocks of 100...
+           (let [clinit (asm/add-method ns-init
+                                        {:name '<clinit>
+                                         :descriptor [:method :void []]
+                                         :flags #{:public :static}})
+                 [start-try end-try end final]
+                 (map gensym ["TRY__" "DONE__" "END__" "FIN__"])]
+             (asm/emit ns-init clinit
+               `([:iconst-2] ; inlined Compiler/pushNS()
+                 [:anewarray [:array ~Object]]
+                 [:dup]
+                 [:iconst-0] ; arr arr 0
+                 [:ldc "clojure.core"]
+                 [:invokestatic [~Symbol "create"
+                                 [:method ~Symbol [~String]]]]
+                 [:ldc "*ns*"]
+                 [:invokestatic [~Symbol "create"
+                                 [:method ~Symbol [~String]]]]
+                 [:invokestatic [~Var "intern"
+                                 [:method ~Var [~Symbol ~Symbol]]]]
+                 [:aastore] ; arr[var,null]
+                 [:invokestatic [~PersistentHashMap "create"
+                                 [:method ~PersistentHashMap
+                                          [[:array Object]]]]]
+                 [:invokestatic [~Var ~'pushThreadBindings
+                                 [:method :void [~Associative]]]]
 
-      (let [init-const (add-method ns-init {:name '__init0
-                                            :descriptor [:method :void []]
-                                            :flags #{:public :static}})]
-        (binding [*print-dup* true]
-          (doseq [c (:constants @ns-init)]
-              (emit init-ns init-const
-                `(~@(gen-constant c)
-                  [:checkcast ~(:type c)]
-                  [:putstatic (:name @ns-init) (constant-name i) (:type c)]))))
-        (emit1 init-ns init-const [:return])
-        (assemble-method init-const))
+                 [:label ~start-try]
+                 [:invokestatic [(:name @init-ns) 'load [:method :void []]]]
+                 [:label ~end-try]
+                 [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
+                 [:goto ~end]
+                 [:label ~final]
+                 [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
+                 [:athrow]
+                 [:label ~end]
+                 [:return]
+                 [:catch ~start-try ~end-try ~final nil]))
+             (asm/assemble-method clinit))
+           (let [ns-init (asm/assemble-class ns-init)])))))))
 
-      (let [clinit (add-method ns-init {:name '<clinit>
-                                        :descriptor [:method :void []]
-                                        :flags #{:public :static}})
-            [start-try end-try end final] (take 4 (repeatedly gensym))]
-        (emit init-ns clinit
-          `([:iconst-2] ; inlined Compiler/pushNS()
-            [:anewarray [:array ~Object]]
-            [:dup]
-            [:iconst-0] ; arr arr 0
-            [:ldc "clojure.core"]
-            [:invokestatic [~Symbol "create" [:method ~Symbol [~String]]]]
-            [:ldc "*ns*"]
-            [:invokestatic [~Symbol "create" [:method ~Symbol [~String]]]]
-            [:invokestatic [~Var "intern" [:method ~Var [~Symbol ~Symbol]]]]
-            [:aastore] ; arr[var,null]
-            [:invokestatic [~PersistentHashMap "create"
-                            [:method ~PersistentHashMap [[:array Object]]]]]
-            [:invokestatic [~Var ~'pushThreadBindings
-                            [:method :void [~Associative]]]]
-
-            [:label ~start-try]
-            [:invokestatic (:name @init-ns) 'load [:method :void []]]
-            [:label ~end-try]
-            [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
-            [:goto ~end]
-            [:label ~final]
-            [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
-            [:athrow]
-            [:label ~end]
-            [:return]
-            [:catch ~start-try ~end-try ~final nil]))
-        (assemble-method clinit))
-      (assemble-class ns-init)
-      (sendout @ns-init *compile-path*))))
-
-(defn compile1
-  "Compile a top-level form"
+(defn- compile1
+  "Compile and eval a top-level form"
   [form]
-  (let [form (macroexpand-impl form)]
-    (if (and (seq? form) (= (first form) 'do))
-      (doall (apply concat (map compile1 (next form))))
-      (let [tagged (analyze form :eval)
-            bytecode (gen tagged :expression)]
-        (eval-impl tagged)
-        bytecode)))))
+  ;(println "Compiling" form)
+  (run [form (macroexpand-impl *ns* form)
+        res (if (and (seq? form) (= (first form) 'do))
+              (m-map compile1 (next form))
+              (run [analyzed (analyze form)
+                    loader (fetch-val :loader)]
+                (let [bytecode (gen analyzed)]
+                  ;(println "Eval-toplevel" form)
+                  (eval-toplevel analyzed loader)
+                  bytecode)))]
+    res))
+
+(defn- root-resource [lib]
+  (str \/
+       (.. (name lib)
+           (replace \- \_)
+           (replace \. \/))))
+
+(defn compile [lib]
+  (let [root (root-resource lib)
+        cljfile (.substring (str root ".clj") 1)
+        loader (RT/baseLoader)]
+    (with-open [ins (.getResourceAsStream loader cljfile)
+                inrd (InputStreamReader. ins (Charset/forName "UTF-8"))]
+      (binding [*ns* *ns*
+                *compile-files* true]
+        (compile-file inrd cljfile
+          (.substring cljfile (inc (.lastIndexOf cljfile "/"))))))))
+      

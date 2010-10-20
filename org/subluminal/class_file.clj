@@ -1910,6 +1910,7 @@
   "Add one instruction to the code buffer converting symbolic
   constants to constant pool indices"
   [cref mref instr ctx]
+  (println "emit instr" instr)
   (dosync
     (let [code (get-in @mref [:attributes 0])
           pool (:symtab @cref)

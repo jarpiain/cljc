@@ -195,12 +195,12 @@
 )
 
 (defn make-binding
-  ([sym jtype] (make-binding sym jtype :local))
-  ([sym jtype kind]
+  ([sym jtype] (make-binding sym jtype :local nil))
+  ([sym jtype kind lbl]
    (let [jtype (if jtype jtype Object)]
      (fn [ctx]
        (let [b {:symbol sym
-                :label (gensym "BB")
+                :label (or lbl (gensym "BB"))
                 :kind kind
                 :method-tag (:method ctx)
                 :fn-tag (:fn ctx)
@@ -208,6 +208,12 @@
                 :clear-root (:clear-root ctx)}]
          [b (update-in ctx [:lexicals]
                        assoc sym b)])))))
+
+;; the assembler recognizes 'this as a special label
+(defn make-this-binding
+  [sym jtype]
+  (make-binding sym jtype :fnarg 'this))
+
 
 (defn- clear-path [b]
   (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
@@ -287,7 +293,6 @@
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
   [x]
-  ;(println "ZYNCAT" x)
   (let [x (if (instance? LazySeq x)
             (if-let [sx (seq x)] sx ())
             x)]
@@ -454,8 +459,7 @@
 (defmethod analyze ::symbol
   [sym]
   (run
-    [_ (m-result (println "Sym to analyze:" sym))
-     unbox-type (fetch-val :want-unboxed)
+    [unbox-type (fetch-val :want-unboxed)
      lex (resolve-lexical sym)
      pos (fetch-val :position)
      bind (if lex
@@ -1160,9 +1164,7 @@
 (defmethod analyze ::invocation
   [[op & args :as form]]
   (run
-    [_ (m-result (println "EXP>>" form))
-     me (macroexpand-impl *ns* form)
-     _ (m-result (println ">>EXP" me))
+    [me (macroexpand-impl *ns* form)
      res (if-not (identical? me form)
            (analyze me)
            (run [pos (update-val :position #(if (= % :eval) :eval :expression))
@@ -1632,9 +1634,10 @@
                         (str (.replace (munge-impl (name n)) "." "_DOT_")
                              (if enc (str "__" (RT/nextID)) ""))
                         (str "fn__" (RT/nextID)))]
+      (println "base" base-name "simple" simple-name "this" n)
       (with-meta `(~'fn* ~@methods)
                  {:src form
-                  :this-name this-name ; symbol used for self-recursion
+                  :this-name n ; symbol used for self-recursion
                   :enclosing-method enc
                   :static? static?
                   :once-only (:once (meta op))
@@ -1770,14 +1773,15 @@
                  (not (or (= ret-class Long/TYPE) (= ret-class Double/TYPE))))
         (throw (IllegalArgumentException.
                  "Only long and double primitives are supported")))
-      (run [{:keys [this-name static?] :as this-fn} (fetch-val :fn)
+      (run [{:keys [this-name static?] :as this-fn} current-object
             argv (m-result (process-fn*-args argv static?))
             _ (push-method-frame {:loop-label (gensym "LL")
                                   :loop-locals nil})
             thisb (if static?
                     (m-result nil)
-                    (make-binding (or this-name (gensym "THIS")) IFn :fnarg))
-            bind (m-map (fn [[s t]] (make-binding s t :fnarg))
+                    (make-this-binding
+                      (or this-name (gensym "THIS")) IFn))
+            bind (m-map (fn [[s t]] (make-binding s t :fnarg nil))
                         (if (variadic? argv)
                           (conj (:required-params argv)
                                 (:rest-param argv))

@@ -340,3 +340,91 @@
           (if (and *macroexpand-limit* (>= n *macroexpand-limit*))
             (throw (Exception. (str "Runaway macroexpansion: " form)))
             (recur fx (inc n))))))))
+
+;;;; Arg type matching
+
+;; Why is Reflector/boxArgs not public?
+(defn box-args [cls avals]
+  (amap avals i _
+        (let [^Class aclass (aget cls i)
+              aval (aget avals i)]
+          (cond
+            (not (.isPrimitive aclass))
+            (.cast aclass aval)
+            (= aclass Boolean/TYPE)
+            (.cast Boolean/TYPE aval)
+            (= aclass Character/TYPE)
+            (.cast Character/TYPE aval)
+            :else
+            (if (number? aval)
+              (cond
+                (= aclass Byte/TYPE)
+                (.byteValue ^Number aval)
+                (= aclass Short/TYPE)
+                (.shortValue ^Number aval)
+                (= aclass Integer/TYPE)
+                (.intValue ^Number aval)
+                (= aclass Long/TYPE)
+                (.longValue ^Number aval)
+                (= aclass Float/TYPE)
+                (.floatValue ^Number aval)
+                (= aclass Double/TYPE)
+                (.doubleValue ^Number aval))
+              (throw (IllegalArgumentException.
+                       (str "Unexpected param type, expected "
+                            aclass ", given: " (.getName (class aval))))))))))
+
+(defn subsumes [^"[Ljava.lang.Class;" left
+                ^"[Ljava.lang.Class;" right]
+  (areduce left i ret false
+           (let [l (aget left i) r (aget right i)]
+             (cond
+               (nil? ret) nil
+               (= l r) ret
+               (or (and (not (.isPrimitive l))
+                        (.isPrimitive r))
+                   (.isAssignableFrom r l))
+               true
+               :else nil))))
+
+(defn matching-constructor
+  [args ctors]
+  (let [args (vec args)]
+    (loop [best nil tied? false found-exact? false ctors ctors]
+      (if (nil? ctors)
+        (if tied?
+          (throw (IllegalArgumentException.
+                   "More than one matching constructor found"))
+          best)
+        (let [curr (first ctors)
+              curr-types (.getParameterTypes curr)
+              [exacts match?]
+              (areduce 
+                curr-types i r [0 true]
+                (let [[exact match] r
+                      parm (aget curr-types i)
+                      arg (args i)]
+                  (if (= parm arg)
+                    [(inc exact) match]
+                    [exact (Reflector/paramArgTypeMatch parm arg)])))]
+          (cond
+            (== exacts (count args))
+            (recur
+              (if (not found-exact?) curr best)
+              tied? true (next ctors))
+            (and match? (not found-exact?))
+            (cond
+              (nil? best)
+              (recur curr tied? found-exact? (next ctors))
+              (subsumes curr-types
+                        (.getParameterTypes best))
+              (recur curr false found-exact? (next ctors))
+              (Arrays/equals curr-types
+                             (.getParameterTypes best))
+              (recur curr tied? found-exact? (next ctors))
+              (not (subsumes (.getParameterTypes best)
+                             curr-types))
+              (recur best true found-exact? (next ctors))
+              :else
+              (recur best tied? found-exact? (next ctors)))
+            :else (recur best tied? found-exact? (next ctors))))))))

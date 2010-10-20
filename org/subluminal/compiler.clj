@@ -746,6 +746,99 @@
     [:aconst-null]
     ~@(maybe-pop position)))
 
+;;;; Exception handling
+
+(defmethod analyze [::special 'throw]
+  [[_ ex :as form]]
+  (fn [ctx]
+    (if (= (:position ctx) :eval)
+      ((analyze `((~'fn* [] ~form))) ctx)
+      (run-with ctx
+        [pos (set-val :position :expression)
+         _ (set-val :want-unboxed nil)
+         exc (analyze ex)
+         _ (set-val :position pos)]
+        {::etype ::throw
+         :position pos
+         :java-type Void/TYPE
+         :exc exc}))))
+
+(defmethod gen ::throw
+  [{:keys [exc]}]
+  `(~@(gen exc)
+    [:checkcast ~Throwable]
+    [:athrow]))
+
+;;;; Host expressions
+
+(defmethod analyze [::special 'new]
+  [[_ cls & ctor-args :as form]]
+  (if (< (count form) 2)
+    (throw (Exception. (str "Wrong number of arguments, "
+                            "expecting (new Classname args...)")))
+    (let [^Class c (maybe-class *ns* cls false)]
+      (if-not c
+        (throw (IllegalArgumentException.
+                 (str "Unable to resolve classname: " cls)))
+        (run [pos (set-val :position :expression)
+              _ (set-val :want-unboxed true)
+              args (m-map analyze ctor-args)
+              _ (set-val :position pos)]
+          (let [ctors (filter (fn [^Constructor ctor]
+                                (= (count (.getParameterTypes ctor))
+                                   (count args)))
+                              (.getConstructors c))
+                match
+                (cond
+                  (empty? ctors)
+                  (throw (Exception. (str "No matching ctor found for " c)))
+                  (not (next ctors))
+                  (first ctors)
+                  :else
+                  (matching-constructor (map :java-type args) ctors))]
+            {::etype ::new
+             :java-type c
+             :ctor match
+             :args args
+             :position pos}))))))
+
+(defn gen-typed-arg [typ arg]
+  (let [atyp (:java-type arg)
+        acode (gen arg)]
+    (cond
+      (= typ arg)
+      acode
+      (not (.isPrimitive typ))
+      `(~@acode
+        [:checkcast ~typ])
+      :else
+      `(~@acode
+        ~@(coerce-primitive ~typ)))))
+
+(defmethod gen ::new
+  [{:keys [^Class java-type ^Constructor ctor args position]}]
+  (if ctor
+    `([:new ~java-type]
+      [:dup]
+      ~@(mapcat gen-typed-arg (seq (.getParameterTypes ctor)) args)
+      [:invokespecial ~ctor]
+      ~@(maybe-pop position))
+    `([:ldc ~(.getName java-type)]
+      [:invokestatic ~[Class 'forName [:method Class [String]]]]
+      ~@(gen-array args)
+      [:invokestatic ~[Reflector 'invokeConstructor
+                       [:method Object [Class [:array Object]]]]]
+      ~@(maybe-pop position))))
+
+(defmethod eval-toplevel ::new
+  [{:keys [java-type ^Constructor ctor args]} loader]
+  (let [argvals (into-array (map #(eval-toplevel % loader) args))]
+    (if ctor
+      (.newInstance ctor
+                    (box-args (.getParameterTypes ctor) argvals))
+      (Reflector/invokeConstructor java-type argvals))))
+
+
 ;;;; fn invocation
 
 (defmethod analyze ::invocation
@@ -903,12 +996,27 @@
 
 (defn- coerce-primitive [prim]
   (condp = prim
+    Boolean/TYPE
+    `([:checkcast ~Boolean]
+      [:invokevirtual ~[Boolean 'booleanValue [:method :boolean []]]])
+    Character/TYPE
+    `([:checkcast ~Character]
+      [:invokevirtual ~[Character 'charValue [:method :char []]]])
+    Byte/TYPE
+    `([:checkcast ~Number]
+      [:invokevirtual ~[Number 'byteValue [:method :byte []]]])
+    Short/TYPE
+    `([:checkcast ~Number]
+      [:invokevirtual ~[Number 'shortValue [:method :short []]]])
     Long/TYPE
     `([:checkcast ~Number]
       [:invokevirtual ~[Number 'longValue [:method :long []]]])
     Integer/TYPE
     `([:checkcast ~Number]
       [:invokevirtual ~[Number 'intValue [:method :int []]]])
+    Float/TYPE
+    `([:checkcast ~Number]
+      [:invokevirtual ~[Number 'floatValue [:method :float []]]])
     Double/TYPE
     `([:checkcast ~Number]
       [:invokevirtual ~[Number 'doubleValue [:method :double []]]])))
@@ -932,6 +1040,7 @@
     ~@(map (fn [lb] [(store-op (:java-type lb)) (:label lb)])
            (reverse loop-locals))
     [:goto ~loop-label]))
+
 ;;;; Sequencing
 
 (defmethod analyze [::special 'do]

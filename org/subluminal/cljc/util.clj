@@ -1,4 +1,5 @@
 (in-ns 'org.subluminal.compiler)
+(declare maybe-class)
 
 (defn namespace-for
   ([sym] (namespace-for *ns* sym))

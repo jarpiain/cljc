@@ -295,6 +295,8 @@
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
   [x]
+;  {:post [(do (println "-->" %) true)]}
+;  (print "::analyzing" x)
   (let [x (if (instance? LazySeq x)
             (if-let [sx (seq x)] sx ())
             x)]
@@ -614,7 +616,7 @@
     {::etype ::empty
      :java-class (class coll)
      :position pos
-     :orig coll}))
+     :orig (if (instance? LazySeq coll) () coll)}))
 
 (defmethod gen ::empty
   [{:keys [orig position]}]
@@ -941,6 +943,7 @@
              :args args
              :position pos}))))))
 
+(declare coerce-primitive)
 (defn gen-typed-arg [typ arg]
   (let [atyp (:java-type arg)
         acode (gen arg)]
@@ -952,7 +955,7 @@
         [:checkcast ~typ])
       :else
       `(~@acode
-        ~@(coerce-primitive ~typ)))))
+        ~@(coerce-primitive typ)))))
 
 (defmethod gen ::new
   [{:keys [^Class java-type ^Constructor ctor args position]}]
@@ -1009,12 +1012,11 @@
          :unbox-type source-type
          :tag tag})
       ;; virtual
-      (let [methods (Reflector/getMethods (:java-type inst) (count args)
-                                          (name sym) false)
+      (let [methods (Reflector/getMethods (or (:java-type inst) Object)
+                                          (count args) (name sym) false)
             ^Method the-method
             (cond
-              (empty? methods)
-              (throw (Exception. (str "No matching method: " member)))
+              (empty? methods) nil
               (== (count methods) 1)
               (first methods)
               :else
@@ -1077,6 +1079,7 @@
        :unbox-type source-type
        :tag tag}))))
 
+(declare gen-boxed)
 (defmethod gen ::static-field
   [{:keys [target member java-type unbox-type position]}]
   `([:getstatic ~member]
@@ -1129,6 +1132,14 @@
       [:invokestatic ~[Reflector 'invokeInstanceMethod
                        [:method Object [Object String [:array Object]]]]]
       ~@(maybe-pop position))))
+
+(defmethod eval-toplevel ::instance-method
+  [{:keys [java-type target ^Method meth member args]} loader]
+  (let [inst (eval-toplevel target loader)
+        argvals (into-array (map #(eval-toplevel % loader) args))]
+    (if meth
+      (.invoke meth inst (box-args (.getParameterTypes meth) argvals))
+      (Reflector/invokeInstanceMethod inst (str member) argvals))))
 
 (defmethod analyze [::special '.]
   [[_ target member & args :as form]]
@@ -1232,8 +1243,9 @@
                          :arglists (second (:arglists mm))))
           (run [pos (update-val :position #(if (= % :eval) % :expression))
                 meta-expr (analyze mm)
-                _ (set-val :name (name target))
+                n (set-val :name (name target))
                 init-expr (analyze init)
+                _ (set-val :name n)
                 v (analyze `(~'var ~target))
                 _ (set-val :position pos)]
             {::etype ::def
@@ -1277,7 +1289,7 @@
        target (analyze target)
        value (analyze value)
        _ (set-val :position pos)]
-      (if (isa? (etype target) ::assignable)
+      (if (isa? (::etype target) ::assignable)
         (with-meta `(~'set! ~target ~value)
                    {::etype ::set!
                     :position pos})
@@ -1519,6 +1531,25 @@
       (eval-toplevel then loader)
       (eval-toplevel else loader))))
 
+;; XXX just a quick hack
+(defmethod analyze [::special 'case*]
+  [[_ expr shift mask low high default vmap id? :as form]]
+  (analyze (reduce (fn [part [k e]]
+                     `(if (= ~expr '~k) ~e ~part))
+                   default
+                   (vals vmap))))
+
+  #_(fn [ctx]
+    (if (= (:position ctx) :eval)
+      (analyze `((~'fn* [] ~form)))
+      (run-with ctx
+        [pos (set-val :position :expression)
+         _ (set-val :want-unboxed nil)
+         eexpr (analyze expr)
+         _ (push-clear-node :branch false)
+         evmap (m-map analyze-entry (seq vmap))
+         _ pop-frame])))
+
 ;;;; Let & loop
 
 (declare analyze-loop)
@@ -1558,7 +1589,9 @@
        pos (fetch-val :position)
        jt (fetch-val :want-unboxed)
        bindings (m-map analyze-init (partition 2 bindings))
-       _ (set-val :loop-locals (map first bindings))
+       _ (if loop?
+           (set-val :loop-locals (map first bindings))
+           (m-result nil))
        _ (if loop?
            (set-vals :position :return :loop-label loop-label)
            (m-result nil))
@@ -1642,7 +1675,6 @@
                         (str (.replace (munge-impl (name n)) "." "_DOT_")
                              (if enc (str "__" (RT/nextID)) ""))
                         (str "fn__" (RT/nextID)))]
-      (println "base" base-name "simple" simple-name "this" n)
       (with-meta `(~'fn* ~@methods)
                  {:src form
                   :this-name n ; symbol used for self-recursion
@@ -1679,6 +1711,7 @@
         pos (fetch-val :position)
         [op & meth :as norm] (normalize-fn* form)
         _ (push-object-frame (meta norm))
+        _ (set-val :name nil)
         meth (m-reduce update-method-array
                        (vec (repeat (+ 2 +max-positional-arity+) nil))
                        (map analyze-method meth))
@@ -1699,6 +1732,7 @@
         (throw (Exception. "Static fns can't be closures")))
       ;; TODO: add metadata from original form
       (let [obj (assoc f :methods (filter identity meth)
+                         :form form
                          :variadic-arity variadic-arity)]
         (compile-class classloader obj (if variadic-info RestFn AFunction) [])
         {::etype ::fn
@@ -1924,6 +1958,7 @@
   "Compile and load the class representing
   a fn or (not implemented yet) deftype"
   [loader obj super ifaces]
+  (println "Compile class" (:name obj) "from" (:form obj))
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces
@@ -2016,6 +2051,7 @@
                       (cons form (seqrd rd))))))]
     (seqrd pbr)))
 
+(declare compile1)
 (defn compile-file
   ([rd src-path src-name]
    (asm/assembling [ns-init {:name (file->class-name src-path)
@@ -2029,6 +2065,7 @@
           context (set-state null-context)]
          (let [clj-init (asm/add-method ns-init
                                         {:name 'load
+                                         :flags #{:public :static}
                                          :descriptor [:method :void []]})]
            (asm/emit ns-init clj-init
                      (apply concat loader-code))
@@ -2061,22 +2098,22 @@
                  [:dup]
                  [:iconst-0] ; arr arr 0
                  [:ldc "clojure.core"]
-                 [:invokestatic [~Symbol "create"
-                                 [:method ~Symbol [~String]]]]
+                 [:invokestatic ~[Symbol 'create
+                                  [:method Symbol [String]]]]
                  [:ldc "*ns*"]
-                 [:invokestatic [~Symbol "create"
-                                 [:method ~Symbol [~String]]]]
-                 [:invokestatic [~Var "intern"
-                                 [:method ~Var [~Symbol ~Symbol]]]]
+                 [:invokestatic ~[Symbol 'create
+                                 [:method Symbol [String]]]]
+                 [:invokestatic ~[Var 'intern
+                                 [:method Var [Symbol Symbol]]]]
                  [:aastore] ; arr[var,null]
-                 [:invokestatic [~PersistentHashMap "create"
-                                 [:method ~PersistentHashMap
+                 [:invokestatic ~[PersistentHashMap 'create
+                                 [:method PersistentHashMap
                                           [[:array Object]]]]]
                  [:invokestatic [~Var ~'pushThreadBindings
                                  [:method :void [~Associative]]]]
 
                  [:label ~start-try]
-                 [:invokestatic [(:name @init-ns) 'load [:method :void []]]]
+                 [:invokestatic ~[(:name @ns-init) 'load [:method :void []]]]
                  [:label ~end-try]
                  [:invokestatic [~Var ~'popThreadBindings [:method :void []]]]
                  [:goto ~end]
@@ -2092,7 +2129,6 @@
 (defn- compile1
   "Compile and eval a top-level form"
   [form]
-  (println "Compiling" form)
   (run [form (macroexpand-impl *ns* form)
         res (if (and (seq? form) (= (first form) 'do))
               (m-map compile1 (next form))
@@ -2102,8 +2138,8 @@
                 (let [bytecode (gen analyzed)]
                   (println "Eval-toplevel" form)
                   (eval-toplevel analyzed loader)
-                  bytecode)))]
-    res))
+                  (list bytecode))))]
+    (apply concat res)))
 
 (defn- root-resource [lib]
   (str \/
@@ -2122,4 +2158,5 @@
       (binding [*ns* *ns*
                 *compile-files* true]
         (compile-file inrd cljfile
-          (.substring cljfile (inc (.lastIndexOf cljfile "/"))))))))
+          (.substring cljfile (inc (.lastIndexOf cljfile "/")))))))
+  nil)

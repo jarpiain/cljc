@@ -912,6 +912,30 @@
 
 ;;;; Host expressions
 
+(defmethod analyze [::special 'clojure.core/import*]
+  [[_ cname :as form]]
+  (if (not (string? cname))
+    (throw (Exception. (str "Expected (import* class-name), got: " cname)))
+    (run [pos (fetch-val :position)]
+      {::etype ::import
+       :position pos
+       :target cname})))
+
+(defmethod gen ::import
+  [{:keys [target position]}]
+  `([:getstatic ~[RT 'CURRENT_NS Var]]
+    [:invokevirtual ~[Var 'deref [:method Object []]]]
+    [:checkcast ~Namespace]
+    [:ldc ~target]
+    [:invokestatic ~[Class 'forName [:method Class [String]]]]
+    [:invokevirtual ~[Namespace 'importClass [:method Class [Class]]]]
+    ~@(maybe-pop position)))
+
+(defmethod eval-toplevel ::import
+  [{:keys [target]} loader]
+  (.importClass *ns* (Class/forName target)))
+
+
 (defmethod analyze [::special 'new]
   [[_ cls & ctor-args :as form]]
   (if (< (count form) 2)

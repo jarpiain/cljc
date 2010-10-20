@@ -399,9 +399,14 @@
 (defn maybe-pop
   "Emit the instruction to pop an unused result
   from the operand stack"
-  [pos]
-  (when (= pos :statement)
-    [[:pop]]))
+  ([pos] (maybe-pop pos Object))
+  ([pos jtype]
+   (when (and (= pos :statement)
+              (not= jtype Void/TYPE))
+     (if (or (= jtype Long/TYPE)
+             (= jtype Double/TYPE))
+       [[:pop2]]
+       [[:pop]]))))
 
 (defmethod gen ::null
   [form]
@@ -1077,7 +1082,7 @@
   `([:getstatic ~member]
     ~@(when (not= java-type unbox-type)
         (gen-boxed unbox-type))
-    ~@(maybe-pop position)))
+    ~@(maybe-pop position java-type)))
 
 (defmethod gen ::instance-field
   [{:keys [target target-class member field java-type unbox-type position]}]
@@ -1087,20 +1092,21 @@
       [:getfield ~field]
       ~@(when (not= java-type unbox-type)
           (gen-boxed unbox-type))
-      ~@(maybe-pop position))
+      ~@(maybe-pop position java-type))
     `(~@(gen target)
       [:ldc ~member]
       [:invokestatic ~[Reflector 'invokeNoArgInstanceMember
                        [:method Object [Object String]]]]
       ~@(maybe-pop position))))
 
+;; TODO: fix boxing
 (defmethod gen ::static-method
   [{:keys [target member method
            java-type unbox-type position args]}]
   (if method
     `(~@(mapcat gen-typed-arg (seq (.getParameterTypes method)) args)
       [:invokestatic ~method]
-      ~@(maybe-pop position))
+      ~@(maybe-pop position unbox-type))
     `([:ldc ~(.getName target)]
       [:invokestatic ~[Class 'forName [:method Class [String]]]]
       [:ldc ~member]
@@ -1116,7 +1122,7 @@
     `(~@(gen target)
       ~@(mapcat gen-typed-arg (seq (.getParameterTypes method)) args)
       [:invokevirtual ~method]
-      ~@(maybe-pop position))
+      ~@(maybe-pop position java-type))
     `(~@(gen target)
       [:ldc ~member]
       ~@(gen-array args)

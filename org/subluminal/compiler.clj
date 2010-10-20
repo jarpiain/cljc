@@ -838,6 +838,103 @@
                     (box-args (.getParameterTypes ctor) argvals))
       (Reflector/invokeConstructor java-type argvals))))
 
+(defn analyze-java-method [form ^Class c inst member args unboxed?]
+  nil)
+
+(defn analyze-field [form ^Class c inst member unboxed?]
+  (let [sym (if (symbol? member)
+              member
+              (symbol (name member)))
+        tag (tag-of form)]
+    (if c
+      (let [^Field fld (.getField c (munge-impl (name sym)))
+            typ (.getType fld)
+            source-type (if tag (tag-class *ns* tag) typ)
+            target-type (if (and (.isPrimitive source-type)
+                                 (not (true? unboxed?))
+                                 (not= source-type unboxed?))
+                          Object
+                          source-type)]
+        {::etype ::static-field         
+         :target c
+         :member fld
+         :java-type target-type
+         :unbox-type source-type
+         :tag tag})
+      (let [^Class c (when (and inst (:java-type inst)
+                                (not (.isPrimitive (:java-type inst))))
+                       (:java-type inst))
+            ^Field fld (when c (Reflector/getField
+                                 c (munge-impl (name sym)) false))
+            typ (if fld (.getType fld) Object)
+            source-type (if tag (tag-class *ns* tag) typ)
+            target-type (if (and (.isPrimitive source-type)
+                                 (not (true? unboxed?))
+                                 (not= source-type unboxed?))
+                          Object
+                          source-type)]
+      {::etype ::instance-field
+       :target-class c
+       :target inst
+       :field fld
+       :member (munge-impl (name sym))
+       :java-type target-type
+       :unbox-type source-type
+       :tag tag}))))
+
+(defmethod gen ::static-field
+  [{:keys [target member java-type unbox-type position]}]
+  `([:getstatic ~member]
+    ~@(when (not= java-type unbox-type)
+        (gen-boxed unbox-type))
+    ~@(maybe-pop position)))
+
+(defmethod gen ::instance-field
+  [{:keys [target target-class member field java-type unbox-type position]}]
+  (if field
+    `(~@(gen target)
+      [:checkcast ~target-class]
+      [:getfield ~field]
+      ~@(when (not= java-type unbox-type)
+          (gen-boxed unbox-type))
+      ~@(maybe-pop position))
+    `(~@(gen target)
+      [:ldc ~member]
+      [:invokestatic ~[Reflector 'invokeNoArgInstanceMember
+                       [:method Object [Object String]]]]
+      ~@(maybe-pop position))))
+
+(defmethod analyze [::special '.]
+  [[_ target member & args :as form]]
+  (if (< (count form) 3)
+    (throw (IllegalArgumentException.
+             "Malformed member expression, expecting (. target member ...)"))
+    (let [^Class c (maybe-class *ns* target false)
+          field? (and (= (count form) 3)
+                      (or (symbol? member) (keyword? member)))]
+      (run [pos (update-val :position #(if (= % :eval) :eval :expression))
+            unboxed? (set-val :want-unboxed nil)
+            inst (if c (m-result nil) (analyze target))
+            field? (m-result
+                     (if (and field? (not (keyword? member)))
+                       (if c
+                         (empty? (Reflector/getMethods
+                                   c 0 (munge-impl (name member)) true))
+                         (if (and inst (:java-type inst)
+                                  (not (.isPrimitive (:java-type inst))))
+                           (empty? (Reflector/getMethods
+                                     (:java-type inst) 0
+                                     (munge-impl (name member)) false))
+                           field?))
+                       field?))
+            _ (set-val :want-unboxed true)
+            args (m-map analyze args)
+            _ (set-val :position pos)]
+        (assoc
+          (if field?
+            (analyze-field form c inst member unboxed?)
+            (analyze-java-method form c inst member args unboxed?))
+          :position pos)))))
 
 ;;;; fn invocation
 
@@ -1123,34 +1220,41 @@
          :then then
          :else else}))))
 
-(defn gen-boxed [orig-type form]
+(defn gen-boxed [orig-type]
   (cond
     (= orig-type Boolean/TYPE)
     (let [[falsel endl] (map gensym ["False__ " "End__"])]
-    `(~@(gen form)
-      [:ifeq ~falsel]
+    `([:ifeq ~falsel]
       [:getstatic ~[Boolean 'TRUE Boolean]]
       [:goto ~endl]
       [:label ~falsel]
       [:getstatic ~[Boolean 'FALSE Boolean]]
       [:label ~endl]))
+    (= orig-type Character/TYPE)
+    `([:invokestatic ~[Character 'valueOf [:method Character [:char]]]])
+    (= orig-type Byte/TYPE)
+    `([:invokestatic ~[Byte 'valueOf [:method Byte [:byte]]]])
+    (= orig-type Short/TYPE)
+    `([:invokestatic ~[Short 'valueOf [:method Short [:short]]]])
+    (= orig-type Integer/TYPE)
+    `([:invokestatic ~[Integer 'valueOf [:method Integer [:int]]]])
     (= orig-type Long/TYPE)
-    `(~@(gen form)
-      [:invokestatic ~[Long 'valueOf [:method Long [Long/TYPE]]]])
+    `([:invokestatic ~[Long 'valueOf [:method Long [:long]]]])
+    (= orig-type Float/TYPE)
+    `([:invokestatic ~[Float 'valueOf [:method Float [:float]]]]))
     (= orig-type Double/TYPE)
-    `(~@(gen form)
-      [:invokestatic ~[Double 'valueOf [:method Double [Double/TYPE]]]])
-    :else (gen form)))
+    `([:invokestatic ~[Double 'valueOf [:method Double [:double]]]])
+    :else nil)
 
 (defmethod gen ::if
   [{:keys [position java-type test then else]}]
   (let [lt (:java-type then) rt (:java-type else)
         coerce-left (if (= lt java-type)
                       (gen then)
-                      (gen-boxed lt then))
+                      (concat (gen then) (gen-boxed lt)))
         coerce-right (if (= rt java-type)
                        (gen else)
-                       (gen-boxed rt else))]
+                       (concat (gen else) (gen-boxed rt)))]
     (if (can-emit-unboxed? test)
       (let [[falsel endl] (map gensym ["False__" "End__"])]
         `(~@(gen test)

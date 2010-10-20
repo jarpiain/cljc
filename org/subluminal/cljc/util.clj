@@ -273,15 +273,14 @@
 ;; macroexpand exists in clojure.core
 ;; but just delegates to clojure.lang.Compiler
 
-(def *macroexpand-limit* 100)
-
 (def +specials+
   #{'if 'let* 'loop* 'fn* 'recur 'quote
     'var 'def 'monitor-enter 'monitor-exit
+    'throw 'new
     ;; TODO:
     'clojure.core/import*
-    'throw 'try 'catch 'finally 'case* '.
-    'letfn* 'set! 'deftype* 'reify* 'new '&})
+    'try 'catch 'finally 'case* '.
+    'letfn* 'set! 'deftype* 'reify* '&})
 
 (defn macroexpand1-impl
   [nss env form]
@@ -324,11 +323,13 @@
 
                 (.endsWith sname ".")
                 (with-meta
-                  `(~'new ~(symbol (.substring sname (dec (count sname))))
+                  `(~'new ~(symbol (.substring sname 0 (dec (count sname))))
                        ~@(next form))
                   (meta form))
 
                 :else form))))))))
+
+(def *macroexpand-limit* 100)
 
 (defn macroexpand-impl
   [nss form]

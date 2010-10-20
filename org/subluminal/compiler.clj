@@ -201,6 +201,7 @@
      (fn [ctx]
        (let [b {:symbol sym
                 :label (or lbl (gensym "BB"))
+                :force-live (when lbl true) ; don't clear 'this'
                 :kind kind
                 :method-tag (:method ctx)
                 :fn-tag (:fn ctx)
@@ -236,8 +237,9 @@
   (fn [ctx]
     (let [inst (assoc b :clear-path ctx
                         ::etype ::local-binding
-                        :live (atom (not= (:clear-root b)
-                                          (:clear-root ctx))))
+                        :live (atom (or (:force-live b)
+                                        (not= (:clear-root b)
+                                              (:clear-root ctx)))))
           lives (get-in ctx [:binding-sites (:label b)])
           lives (reduce (fn [coll inst2]
                           (let [j (join-point inst inst2)]
@@ -1991,6 +1993,7 @@
             (println "Caught while loading class:" (class e) e))
           (finally
             (when *debug-inspect*
+              (.clear bytecode)
               (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))))))
     loader))
 

@@ -24,6 +24,7 @@
 (def eval-toplevel nil)
 (def *debug-inspect* false)
 
+(comment
 (defstruct context
            :loader
            :position    ; :eval :statement :expression :return
@@ -41,6 +42,7 @@
            :binding-sites ; map of label -> lex-binding-inst
            :index
            :parent)     ; context
+)
 
 (defn current-method [ctx]
   [(get (:index ctx) (:method ctx)) ctx])
@@ -166,6 +168,7 @@
      :binding-sites {}
      :parent nil}))
 
+(comment
 (defstruct fn-class
            :symbol ; may be nil
            :internal-name
@@ -189,6 +192,7 @@
            ;; for binding instances
            :live
            :clear-path)
+)
 
 (defn make-binding
   ([sym jtype] (make-binding sym jtype :local))
@@ -205,11 +209,11 @@
          [b (update-in ctx [:lexicals]
                        assoc sym b)])))))
 
-(defn clear-path [b]
+(defn- clear-path [b]
   (let [p (reverse (next (take-while identity (iterate :clear-path b))))]
     p))
 
-(defn join-point [b1 b2]
+(defn- join-point [b1 b2]
   (loop [p1 (clear-path b1) p2 (clear-path b2)]
     (cond
       (not= (:clear-tag (first p1)) (:clear-tag (first p2)))
@@ -240,28 +244,15 @@
        (assoc-in ctx [:binding-sites (:label b)]
                  (conj lives inst))])))
 
-#_(defn boxing-unify [x y]
-  (cond
-    (= x y)
-    x
+(defn valid-binding?
+  "Return true if b is a local in the current method
+  (not closed-over)"
+  [b ctx]
+  (= (:fn-tag b) (:fn ctx)))
 
-    (or (nil? x) (nil? y))
-    nil
-
-    (isa? x y)
-    y
-
-    (isa? y x)
-    x
-
-    :else
-    Object))
-
-(defn valid-binding? [b ctx]
-  (and
-    (= (:fn-tag b) (:fn ctx))))
-
-(defn close-over [b]
+(defn close-over
+  "Make the current method a closure over b"
+  [b]
   (fn updater [ctx]
     (loop [obj (:fn ctx) ctx2 ctx same true]
       (assert obj)
@@ -282,7 +273,10 @@
                                  :place (:name (get :index ctx2) obj)))
                false)))))
 
-(defn resolve-lexical [sym]
+(defn resolve-lexical
+  "Return the visible lexical binding of sym if any.
+  The current method will be made closure over the binding"
+  [sym]
   (fn [ctx]
     (if-let [b (get (:lexicals ctx) sym)]
       ((close-over b) ctx)
@@ -327,13 +321,15 @@
 
 (defmulti eval-toplevel
   "Evaluate an analyzed top-level form"
-  (fn [form loader] (::etype form)))
+  (fn [form ^ClassLoader loader] (::etype form)))
 
 (defmethod eval-toplevel :default
   [form loader]
   (throw (Exception. (str "Can't eval " (::etype form) " form"))))
 
 ;; nil represents the null type (assignable to all reference types)
+;; Using Void/TYPE for UntypedExprs though this doesn't seem to be
+;; very useful
 (defn has-java-class? [f]
   (not= (:java-type f) Void/TYPE))
 
@@ -341,10 +337,13 @@
   (and c (.isPrimitive c) (not= c Void/TYPE)))
 
 (defn can-emit-unboxed? [f]
-  (let [^Class c (:java-type f)]
-    (and c (.isPrimitive c) (not= c Void/TYPE))))
+  (is-primitive? (:java-type f)))
 
-(defn local-type [hinted inferred]
+(defn- local-type
+  "Decide the type of a let-local in case
+  there is both a type hint and inferred type
+  for the initializer expression"
+  [hinted inferred]
   (cond
     (and (nil? hinted) (nil? inferred)) Object
 
@@ -388,7 +387,12 @@
       :position (:position ctx)}
      ctx]))
 
-(defn maybe-pop [pos]
+;; FIXME: breaks if there are primitive longs and doubles
+;; in :statement position
+(defn maybe-pop
+  "Emit the instruction to pop an unused result
+  from the operand stack"
+  [pos]
   (when (= pos :statement)
     [[:pop]]))
 
@@ -812,7 +816,8 @@
       {::etype ::finally
        :body body})))
 
-(defn ensure-primitive [^Class cls]
+(defn- ensure-primitive
+  [^Class cls]
   (when (and cls (.isPrimitive cls) cls)))
 
 (defmethod analyze [::special 'try]
@@ -960,7 +965,63 @@
       (Reflector/invokeConstructor java-type argvals))))
 
 (defn analyze-java-method [form ^Class c inst member args unboxed?]
-  nil)
+  (let [sym (if (symbol? member)
+              member
+              (symbol (name member)))
+        tag (tag-of form)]
+    (if c
+      ;; static
+      (let [methods (Reflector/getMethods c (count args) (name sym) true)
+            ^Method the-method
+            (cond
+              (empty? methods)
+              (throw (Exception. (str "No matching method: " member)))
+              (== (count methods) 1)
+              (first methods)
+              :else
+              (matching-method (map :java-type args) methods))
+            typ (if the-method (.getReturnType the-method) Object)
+            source-type (if tag (tag-class *ns* tag) typ)
+            target-type (if (and (.isPrimitive source-type)
+                                 (not (true? unboxed?))
+                                 (not= source-type unboxed?))
+                          Object
+                          source-type)]
+        {::etype ::static-method
+         :target c
+         :args args
+         :method the-method
+         :member member
+         :java-type target-type
+         :unbox-type source-type
+         :tag tag})
+      ;; virtual
+      (let [methods (Reflector/getMethods (:java-type inst) (count args)
+                                          (name sym) false)
+            ^Method the-method
+            (cond
+              (empty? methods)
+              (throw (Exception. (str "No matching method: " member)))
+              (== (count methods) 1)
+              (first methods)
+              :else
+              (matching-method (map :java-type args) methods))
+            typ (if the-method (.getReturnType the-method) Object)
+            source-type (if tag (tag-class *ns* tag) typ)
+            target-type (if (and (.isPrimitive source-type)
+                                 (not (true? unboxed?))
+                                 (not= source-type unboxed?))
+                          Object
+                          source-type)]
+        {::etype ::instance-method
+         :target inst
+         :target-class (:java-type inst)
+         :args args
+         :method the-method
+         :member member
+         :java-type target-type
+         :unbox-type source-type
+         :tag tag}))))
 
 (defn analyze-field [form ^Class c inst member unboxed?]
   (let [sym (if (symbol? member)
@@ -1025,6 +1086,36 @@
                        [:method Object [Object String]]]]
       ~@(maybe-pop position))))
 
+(defmethod gen ::static-method
+  [{:keys [target member method
+           java-type unbox-type position args]}]
+  (if method
+    `(~@(mapcat gen-typed-arg (seq (.getParameterTypes method)) args)
+      [:invokestatic ~method]
+      ~@(maybe-pop position))
+    `([:ldc ~(.getName target)]
+      [:invokestatic ~[Class 'forName [:method Class [String]]]]
+      [:ldc ~member]
+      ~@(gen-array args)
+      [:invokestatic ~[Reflector 'invokeStaticMethod
+                       [:method Object [Class String [:array Object]]]]]
+      ~@(maybe-pop position))))
+
+(defmethod gen ::instance-method
+  [{:keys [target target-class member method
+           java-type unbox-type position args]}]
+  (if method
+    `(~@(gen target)
+      ~@(mapcat gen-typed-arg (seq (.getParameterTypes method)) args)
+      [:invokevirtual ~method]
+      ~@(maybe-pop position))
+    `(~@(gen target)
+      [:ldc ~member]
+      ~@(gen-array args)
+      [:invokestatic ~[Reflector 'invokeInstanceMethod
+                       [:method Object [Object String [:array Object]]]]]
+      ~@(maybe-pop position))))
+
 (defmethod analyze [::special '.]
   [[_ target member & args :as form]]
   (if (< (count form) 3)
@@ -1068,8 +1159,8 @@
            (run [pos (update-val :position #(if (= % :eval) :eval :expression))
                  jt (set-val :want-unboxed nil)
                  op (analyze op)
-                 ;; special case: instanceof
-                 ;; special case: keyword invoke, static invoke
+                 ;; TODO special case: instanceof
+                 ;; TODO: keyword invoke, static invoke
                  args (m-map analyze args)
                  _ (set-val :position pos)]
                 {::etype ::invocation
@@ -1212,7 +1303,9 @@
           :loop-locals loop-locals}         
          ctx]))))
 
-(defn- coerce-primitive [prim]
+(defn- coerce-primitive
+  "Generate bytecode to coerce the object on stack to a primitive type"
+  [prim]
   (condp = prim
     Boolean/TYPE
     `([:checkcast ~Boolean]
@@ -1311,7 +1404,7 @@
 
     :else
     (run
-      [pos (fetch-val :position) ; redundant?
+      [pos (fetch-val :position)
        jt (set-val :want-unboxed Boolean/TYPE)
        test-expr (analyze test-expr)
        _ (push-clear-node :branch false)
@@ -1588,12 +1681,6 @@
       (let [obj (assoc f :methods (filter identity meth)
                          :variadic-arity variadic-arity)]
         (compile-class classloader obj (if variadic-info RestFn AFunction) [])
-        (comment (send classloader (bound-fn [& args] (apply compile-class args))
-              obj (if (meth +variadic-index+) RestFn AFunction) []))
-        (try
-          ;(await-for 1000 classloader)
-          (if-let [e (agent-error classloader)]
-            (throw e)))
         {::etype ::fn
          :class-name (:name obj)
          :initargs initargs
@@ -1612,11 +1699,8 @@
                                            (:java-type init)))]]]
     ~@(maybe-pop position)))
 
-;(gen (assoc b ::etype ::local-binding :position :expression))
-
 (defmethod eval-toplevel ::fn
   [{:keys [class-name initargs]} loader]
-;  (await loader)
   (let [^Class c (.loadClass loader (str class-name))
         eargs (doall (map #(eval-toplevel % loader) initargs))
         ^Constructor ctor
@@ -1667,7 +1751,6 @@
                      state)
                    (next remain))))))))
 
-
 (defn analyze-method
   [[argv & body]]
   (if (not (vector? argv))
@@ -1704,6 +1787,7 @@
                 body]))))
 
 ;; Should change to defmulti
+;; TODO serialization with print/read
 (defn gen-constant
   "Generated bytecode to recreate a (quoted) object
   at class initialization time"
@@ -1873,7 +1957,7 @@
           [:areturn]))
       (asm/assemble-method meta))
 
-    (let [with-meta (asm/add-method c {:name 'with-meta
+    (let [with-meta (asm/add-method c {:name 'withMeta
                                        :descriptor
                                          [:method IObj [IPersistentMap]]
                                        :flags #{:public}})]
@@ -1928,7 +2012,7 @@
                      (apply concat loader-code))
            (asm/assemble-method clj-init))
 
-         (let [top (first (current-object context))]
+         (let [[top _] (current-object context)]
            (doseq [fld (:constants top)]
              (let [{:keys [val java-type]} fld]
                (asm/add-field ns-init {:name val
@@ -1986,14 +2070,15 @@
 (defn- compile1
   "Compile and eval a top-level form"
   [form]
-  ;(println "Compiling" form)
+  (println "Compiling" form)
   (run [form (macroexpand-impl *ns* form)
         res (if (and (seq? form) (= (first form) 'do))
               (m-map compile1 (next form))
-              (run [analyzed (analyze form)
+              (run [ _ (m-result (println "Analyzing" form))
+                    analyzed (analyze form)
                     loader (fetch-val :loader)]
                 (let [bytecode (gen analyzed)]
-                  ;(println "Eval-toplevel" form)
+                  (println "Eval-toplevel" form)
                   (eval-toplevel analyzed loader)
                   bytecode)))]
     res))
@@ -2004,7 +2089,9 @@
            (replace \- \_)
            (replace \. \/))))
 
-(defn compile [lib]
+(defn compile
+  "Compile and load a lib and write generated class files to *compile-path*"
+  [lib]
   (let [root (root-resource lib)
         cljfile (.substring (str root ".clj") 1)
         loader (RT/baseLoader)]
@@ -2014,4 +2101,3 @@
                 *compile-files* true]
         (compile-file inrd cljfile
           (.substring cljfile (inc (.lastIndexOf cljfile "/"))))))))
-      

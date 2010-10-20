@@ -359,16 +359,69 @@
                true
                :else nil))))
 
+;; TODO: define a protocol for Methods and Constructors
+;; and merge these two fns:
+
+(defn matching-method
+  [args ctors]
+  (let [args (vec args)]
+    (loop [^Method best nil tied? false found-exact? false ctors ctors]
+      (if (nil? ctors)
+        (if tied?
+          (throw (IllegalArgumentException.
+                   "More than one matching method found"))
+          best)
+        (let [^Method curr (first ctors)
+              curr-types (.getParameterTypes curr)
+              [exacts match?]
+              (areduce 
+                curr-types i r [0 true]
+                (let [[exact match] r
+                      parm (aget curr-types i)
+                      arg (args i)]
+                  (if (= parm arg)
+                    [(inc exact) match]
+                    [exact (Reflector/paramArgTypeMatch parm arg)])))]
+          (cond
+            (== exacts (count args))
+            (recur
+              (if (or (not found-exact?)
+                      (not best)
+                      (.isAssignableFrom (.getReturnType best)
+                                         (.getReturnType curr)))
+                curr best)
+              tied? true (next ctors))
+            (and match? (not found-exact?))
+            (cond
+              (nil? best)
+              (recur curr tied? found-exact? (next ctors))
+              (subsumes curr-types
+                        (.getParameterTypes best))
+              (recur curr false found-exact? (next ctors))
+              (Arrays/equals curr-types
+                             (.getParameterTypes best))
+              (recur
+                (if (.isAssignableFrom (.getReturnType best)
+                                       (.getReturnType curr))
+                  curr best)
+                tied? found-exact? (next ctors))
+              (not (subsumes (.getParameterTypes best)
+                             curr-types))
+              (recur best true found-exact? (next ctors))
+              :else
+              (recur best tied? found-exact? (next ctors)))
+            :else (recur best tied? found-exact? (next ctors))))))))
+
 (defn matching-constructor
   [args ctors]
   (let [args (vec args)]
-    (loop [best nil tied? false found-exact? false ctors ctors]
+    (loop [^Constructor best nil tied? false found-exact? false ctors ctors]
       (if (nil? ctors)
         (if tied?
           (throw (IllegalArgumentException.
                    "More than one matching constructor found"))
           best)
-        (let [curr (first ctors)
+        (let [^Constructor curr (first ctors)
               curr-types (.getParameterTypes curr)
               [exacts match?]
               (areduce 

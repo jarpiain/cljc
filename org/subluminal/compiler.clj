@@ -12,7 +12,7 @@
                          PersistentVector PersistentArrayMap PersistentHashSet
                          RT Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
-        (clojure inspector)
+        (clojure [inspector :only [inspect-tree]])
         (org.subluminal util))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
@@ -1759,15 +1759,11 @@
       (asm/assemble-method with-meta))
 
     (emit-methods obj c)
-    (asm/assemble-class c)
 
-    (let [bytecode (ByteBuffer/allocate 10000)] 
+    (let [c (asm/assemble-class c)
+          bytecode (ByteBuffer/allocate (asm/class-length c))] 
       (bin/write-binary ::asm/ClassFile bytecode c)
-      (let [siz (.position bytecode)
-            arr (byte-array siz)]
-        (.flip bytecode)
-        (.get bytecode arr)
-        (.clear bytecode)
+      (let [arr (.array bytecode)]
         (try
           (.defineClass loader (str (:name obj)) arr nil)
           (catch Throwable e

@@ -271,6 +271,29 @@
   [:attributes-count ::bin/uint16 {:aux (count attributes)}]
   [:attributes [::attribute-info pool] {:times attributes-count}])
 
+(declare pool-length attribute-length)
+
+(defn member-length
+  "Calculates the length of the binary representation
+  of a field or method in bytes"
+  [memb]
+  (+ 8 
+     (* 6 (count (:attributes memb))) ; attr headers
+     (reduce + (map (fn [at] (attribute-length (:name at) at))
+                      (:attributes memb)))))
+
+(defn class-length
+  "Calculates the length of the generated .class file in bytes"
+  [cls]
+  (+ 24
+     (* 2 (count (:implements cls)))
+     (* 6 (count (:attributes cls)))
+     (pool-length (:pool (:symtab cls)))
+     (reduce + (map member-length (:fields cls)))
+     (reduce + (map member-length (:methods cls)))
+     (reduce + (map (fn [at] (attribute-length (:name at) at))
+                    (:attributes cls)))))
+
 ;;;; Constant pool
 
 (defn class-name
@@ -343,6 +366,30 @@
         [:descriptor-index ::bin/uint16])
     :utf8 [:val ::utf8]))
 
+(defn utf8-len [txt]
+  (let [baos (ByteArrayOutputStream. (+ 2 (count txt)))
+        dos (DataOutputStream. baos)]
+    (.writeUTF dos txt)
+    (.size baos)))
+
+(defn pool-entry-length [cp-inf]
+  (if-not cp-inf 0
+    (case (:tag cp-inf)
+      :class 3
+      :field 5
+      :method 5
+      :interface-method 5
+      :string 3
+      :integer 5
+      :float 5
+      :long 9
+      :double 9
+      :name-and-type 5
+      :utf8 (inc (utf8-len (:val cp-inf))))))
+
+(defn pool-length [pool]
+  (reduce + (map pool-entry-length pool)))
+
 (defn lookup-field
   "Lookup symbolic reprepentation of field name and type
    from a Fieldref_info constant"
@@ -374,6 +421,7 @@
 ;;;; Attributes
 
 ;; Used to calculate the length field when writing
+;; Add 6 to get the full length
 (defmulti attribute-length (fn [at inf] at))
 (defmethod attribute-length :default
   [at inf]

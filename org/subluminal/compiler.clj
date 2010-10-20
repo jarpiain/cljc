@@ -769,6 +769,123 @@
     [:checkcast ~Throwable]
     [:athrow]))
 
+(defn- catch-clause? [form]
+  (and (seq? form)
+       (contains? #{'catch 'finally} (first form))))
+
+(defn analyze-catch-clause
+  [unbox? [op & args]]
+  (condp = op
+    'catch
+    (let [[etyp evar & body] args
+          eclass (maybe-class *ns* etyp false)]
+      (cond
+        (nil? eclass)
+        (throw (IllegalArgumentException.
+                 (str "Unable to resolve classname: " etyp)))
+        (not (symbol? evar))
+        (throw (IllegalArgumentException.
+                 (str "Bad binding form, expected symbol, got: " evar)))
+        (namespace evar)
+        (throw (Exception.
+                 (str "Can't bind qualified name: " evar))))
+      (run [_ (push-frame)
+            lb (make-binding evar eclass)
+            _ (set-vals :catching true :want-unboxed unbox?)
+            body (analyze `(~'do ~@body))
+            _ pop-frame]
+        {::etype ::catch
+         :jtype (:java-type body)
+         :bind lb
+         :body body}))
+
+    'finally
+    (run [_ (push-frame)
+          _ (set-vals :catching true :position :statement
+                      :want-unboxed nil)
+          body (analyze `(~'do ~@args))
+          _ pop-frame]
+      {::etype ::finally
+       :body body})))
+
+(defn ensure-primitive [^Class cls]
+  (when (and cls (.isPrimitive cls) cls)))
+
+(defmethod analyze [::special 'try]
+  [[_ & body :as form]]
+  (fn [ctx]
+    (if (not= (:position ctx) :return)
+      ((analyze `((~'fn* [] ~form))) ctx)
+      (let [[body clauses] (split-with (complement catch-clause?) body)]
+        (loop [remain clauses]
+          (when (seq remain)
+            (cond
+              (not (catch-clause? (first remain)))
+              (throw (Exception. (str "Only catch or finally clause"
+                                      " can follow catch in try expression")))
+              (and (= (ffirst remain) 'finally) (next remain))
+              (throw (Exception. (str "Finally clause must be last"
+                                      " in try expression"))))
+            (recur (next remain))))
+        (run-with ctx
+          [pos (fetch-val :position)
+           body (analyze `(~'do ~@body))
+           clauses (m-map (partial analyze-catch-clause
+                                   (ensure-primitive (:java-type body)))
+                          clauses)]
+          (let [final (last clauses)
+                final (when (= (::etype final) ::finally) final)]
+            {::etype ::try
+             :java-type (:java-type body)
+             :body body
+             :position pos
+             :clauses (if final (butlast clauses) clauses)
+             :final final}))))))
+
+(defn gen-catch [ret-local retl start-try end-try finallyl
+                 {:keys [java-type position final]}
+                 {:keys [bind jtype body]}]
+  (let [eclass (:java-type bind)
+        hstart (gensym "HSTART__")
+        hend (gensym "HEND__")]
+    `((:block ~hstart ~hend ~[(:label bind) (:java-type bind)]
+        [:astore ~(:label bind)]
+        ~@(gen body)
+        ~@(when (not= position :statement)
+            (list [(store-op java-type) ret-local])))
+      ~@(when final
+          (gen (:body final)))
+      [:goto ~retl]
+      [:catch ~start-try ~end-try ~hstart ~eclass]
+      ~@(when final (list [:catch hstart hend finallyl nil])))))
+
+(defmethod gen ::try
+  [{:keys [java-type position body clauses final] :as whole}]
+  (let [[start-try end-try endl retl finallyl ret-local]
+        (map gensym ["TRY__" "END_TRY__" "END__" "RET__" "FIN__"
+                     "RETLOC"])]
+    `((:block ~start-try ~endl ~[ret-local java-type]
+        ~@(gen body)
+        ~@(when (not= position :statement)
+            (list [(store-op java-type) ret-local]))
+        [:label ~end-try]
+        ~@(when final
+            (gen (:body final)))
+        [:goto ~retl]
+        ~@(mapcat (partial gen-catch ret-local retl start-try
+                           end-try finallyl whole)
+                  clauses)
+        ~@(when final
+            (let [finalarg (gensym "FVAL")]
+              `((:block ~finallyl nil [~finalarg ~Throwable]
+                  [:astore ~finalarg]
+                  ~@(gen (:body final))
+                  [:aload ~finalarg]
+                  [:athrow]))))
+        [:label ~retl]
+        ~@(when (not= position :statement)
+            (list [(load-op java-type) ret-local]))))))
+
 ;;;; Host expressions
 
 (defmethod analyze [::special 'new]
@@ -1158,6 +1275,7 @@
        _ (set-val :want-unboxed jt)
        tail (analyze (last body))]
       {::etype ::do
+       :java-type (:java-type tail)
        :body (doall (concat stmts [tail]))
        :position pos})))
 
@@ -1694,6 +1812,8 @@
         (asm/assemble-method mref)))))
 
 (defn compile-class
+  "Compile and load the class representing
+  a fn or (not implemented yet) deftype"
   [loader obj super ifaces]
   (asm/assembling [c {:name (:name obj)
                       :extends super

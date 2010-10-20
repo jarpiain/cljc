@@ -1947,6 +1947,7 @@
   "Add an instruction, block, or label into the instruction stream"
   ([cref mref item] (emit1 cref mref (get-in @mref [:attributes 0 :ctx]) item))
   ([cref mref ctx item]
+   {:pre [(and (sequential? item) (not (empty? item)))]}
    (cond
      ;; Todo: LineNumberTable items [:line 128]
      ;;       block directive adds to LocalVarTable
@@ -1966,7 +1967,7 @@
                               'block nil nil []
                               body)))
 
-     (= (first item) 'catch)
+     (= (first item) :catch)
      (let [[_ beg end handler spec] item]
        (dosync
          (let [[idx tab]
@@ -1985,13 +1986,13 @@
      (let [[_ beg end vars & items] item]
        (dosync
          ;; Todo: generate LocalVarTable entries
-         (when beg (emit1 cref mref ['label beg]))
+         (when beg (emit1 cref mref [:label beg]))
          (let [subctx (merge-locals ctx vars)]
            (alter mref update-in [:attributes 0 :max-locals]
                   (partial max (:size subctx)))
            (doseq [i items]
              (emit1 cref mref subctx i)))
-         (when end (emit1 cref mref ['label end]))))
+         (when end (emit1 cref mref [:label end]))))
 
      :else
      (let [[op & args] item]

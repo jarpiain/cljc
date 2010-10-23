@@ -70,6 +70,7 @@
 (load "cljc/util")
 (load "cljc/atomics")
 (load "cljc/compound")
+(load "cljc/object")
 
 (comment
 (defstruct context
@@ -90,45 +91,6 @@
            :index
            :parent)     ; context
 )
-
-(defn push-object-frame [f]
-  (let [tag (gensym "OBJ__")
-        f (assoc f
-                 :fn-tag tag
-                 :constants []
-                 :constant-ids (IdentityHashMap.)
-                 :keywords {}
-                 :vars {}
-                 :keyword-callsites {}
-                 :var-callsites {}
-                 :closed-lexicals (sorted-map))]
-    (fn [ctx]
-      (let [enc (:method ctx)]
-        [nil (assoc ctx
-                    :parent ctx
-                    :fn tag
-                    :index (assoc (:index ctx) tag
-                                  (assoc f :enclosing-method enc)))]))))
-
-(defn push-method-frame [m]
-  (let [tag (gensym "MT__")
-        ct (gensym "CN__")
-        m (assoc m :method-tag tag)]
-    (fn [ctx]
-      (let [obj (:fn ctx)]
-        [nil
-         (assoc ctx
-                :position :return
-                :parent ctx
-                :method tag
-                :loop-label (:loop-label m)
-                :catching nil
-                :clear-tag ct
-                :clear-path ctx
-                :clear-root ct
-                :clear-kind :path
-                :index (assoc (:index ctx) tag
-                              (assoc m :containing-object obj)))]))))
 
 (def null-context
   (let [t (gensym "NULL")]
@@ -171,26 +133,6 @@
            :live
            :clear-path)
 )
-
-(defn make-binding
-  ([sym jtype] (make-binding sym jtype :local nil))
-  ([sym jtype kind lbl]
-   (let [jtype (if jtype jtype Object)]
-     (fn [ctx]
-       (let [b {:symbol sym
-                :label (or lbl (gensym "BB"))
-                :force-live (when lbl true) ; don't clear 'this
-                :kind kind
-                :fn-tag (:fn ctx)
-                :java-type jtype
-                :clear-root (:clear-root ctx)}]
-         [b (update-in ctx [:lexicals]
-                       assoc sym b)])))))
-
-;; the assembler recognizes 'this as a special label
-(defn make-this-binding
-  [sym jtype]
-  (make-binding sym jtype :fnarg 'this))
 
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
@@ -480,196 +422,6 @@
          evmap (m-map analyze-entry (seq vmap))
          _ pop-frame])))
 
-;;;; Closure
-
-(defn normalize-fn*
-  [[op & opts :as form]]
-  (let [this-name (when (symbol? (first opts)) (first opts))
-        static? (:static (meta this-name))]
-    (run
-      [n (if this-name
-           (m-result this-name)
-           (fetch-val :name))
-       enc (fetch-val :enclosing-method)]
-    (let [opts (if (symbol? (first opts))
-                 (next opts)
-                 opts)
-          methods (if (vector? (first opts))
-                    (list opts)
-                    opts)
-          base-name (if enc
-                      (str (:name enc) "$")
-                      (str (munge-impl (name (ns-name *ns*))) "$"))
-          simple-name (if n
-                        (str (.replace (munge-impl (name n)) "." "_DOT_")
-                             (if enc (str "__" (RT/nextID)) ""))
-                        (str "fn__" (RT/nextID)))]
-      (with-meta `(~'fn* ~@methods)
-                 {:src form
-                  :this-name n ; symbol used for self-recursion
-                  :enclosing-method enc
-                  :static? static?
-                  :once-only (:once (meta op))
-                  :fn-tag (gensym "FN")
-                  ;; name of generated class
-                  :name (symbol (str base-name simple-name))})))))
-
-(declare analyze-method compile-class)
-(defn variadic? [argv]
-  (not (nil? (:rest-param argv))))
-
-(def +max-positional-arity+ 20)
-(def +variadic-index+ (inc +max-positional-arity+))
-
-(defn arity [m]
-  (count (:required-params (:argv m))))
-
-(defn- update-method-array [arr [info body :as m]]
-  (let [arty (arity info)]
-    (if (variadic? (:argv info))
-      (if (arr +variadic-index+)
-        (throw (Exception. "Can't have more than 1 variadic overload"))
-        (assoc arr +variadic-index+ m))
-      (if (arr arty)
-        (throw (Exception. "Can't have 2 overloads with same arity"))
-        (assoc arr arty m)))))
-
-(defmethod analyze [::special 'fn*]
-  [[op & opts :as form]]
-  (run [classloader (fetch-val :loader)
-        pos (fetch-val :position)
-        [op & meth :as norm] (normalize-fn* form)
-        _ (push-object-frame (meta norm))
-        _ (set-val :name nil)
-        meth (m-reduce update-method-array
-                       (vec (repeat (+ 2 +max-positional-arity+) nil))
-                       (map analyze-method meth))
-        f current-object
-        _ pop-frame
-        _ (set-val :want-unboxed true)
-        initargs (m-map analyze (map :symbol (vals (:closed-lexicals f))))]
-    (let [[variadic-info _] (meth +variadic-index+)
-          variadic-arity (when variadic-info (arity variadic-info))]
-      (when (and variadic-info
-                 (some identity (subvec meth (inc variadic-arity)
-                                        +variadic-index+)))
-        (throw (Exception.
-                 (str "Can't have fixed arity function"
-                      " with more params than variadic function"))))
-      (when (and (:static? f)
-                 (not (empty? (:closed-lexicals f))))
-        (throw (Exception. "Static fns can't be closures")))
-      ;; TODO: add metadata from original form
-      (let [obj (assoc f :methods (filter identity meth)
-                         :form form
-                         :variadic-arity variadic-arity)]
-        (compile-class classloader obj (if variadic-info RestFn AFunction) [])
-        {::etype ::fn
-         :class-name (:name obj)
-         :initargs initargs
-         :position pos}))))
-
-(defmethod gen ::fn
-  [{:keys [class-name initargs position]}]
-  `([:new ~class-name]
-    [:dup]
-    ~@(apply concat
-        (for [b initargs]
-          (gen b)))
-    [:invokespecial ~[class-name '<init>
-                      [:method :void (for [init initargs]
-                                       (or (:unbox-type init)
-                                           (:java-type init)))]]]
-    ~@(maybe-pop position)))
-
-(defmethod eval-toplevel ::fn
-  [{:keys [class-name initargs]} loader]
-  (let [^Class c (.loadClass loader (str class-name))
-        eargs (doall (map #(eval-toplevel % loader) initargs))
-        ^Constructor ctor
-        (.getConstructor c (into-array Class (map :java-type initargs)))]
-    (.newInstance ctor (into-array Object eargs))))
-
-(defn process-fn*-args [argv static?]
-  (loop [req-params [] rest-param nil state :req remain argv]
-    (if-not (seq remain)
-      {:required-params req-params
-       :rest-param rest-param}
-      (let [arg (first remain)]
-        (cond
-          (not (symbol? arg))
-          (throw (Exception. "fn params must be symbols."))
-
-          (namespace arg)
-          (throw (Exception. "Can't use qualified name as parameter: " arg))
-
-          (= arg '&)
-          (if (= state :req)
-            (recur req-params rest-param :rest (next remain))
-            (throw (Exception. "Invalid parameter list")))
-
-          :else
-          (let [c (tag-class *ns* (tag-of arg))
-                c (if (= state :rest) ISeq c)]
-            (cond
-              (and (.isPrimitive c) (not static?))
-              (throw (Exception.
-                (str "Non-static fn can't have primitive parameter: " arg)))
-
-              (and (.isPrimitive c)
-                   (not (or (= c Long/TYPE) (= c Double/TYPE))))
-              (throw (IllegalArgumentException.
-                (str "Only long and double primitives are supported: " arg)))
-
-              (and (= state :rest) (not= (tag-of arg) nil))
-              (throw (Exception. "& arg can't have type hint")))
-            (recur (if (= state :req)
-                     (conj req-params [arg c])
-                     req-params)
-                   (if (= state :rest)
-                     [arg c]
-                     nil)
-                   (if (= state :rest)
-                     :done
-                     state)
-                   (next remain))))))))
-
-(defn analyze-method
-  [[argv & body]]
-  (if (not (vector? argv))
-    (throw (IllegalArgumentException.
-             "Malformed method, expected argument vector"))
-    (let [ret-class (tag-class *ns* (tag-of argv))]
-      (when (and (.isPrimitive ret-class)
-                 (not (or (= ret-class Long/TYPE) (= ret-class Double/TYPE))))
-        (throw (IllegalArgumentException.
-                 "Only long and double primitives are supported")))
-      (run [{:keys [this-name static?] :as this-fn} current-object
-            argv (m-result (process-fn*-args argv static?))
-            _ (push-method-frame {:loop-label (gensym "LL")
-                                  :loop-locals nil})
-            thisb (if static?
-                    (m-result nil)
-                    (make-this-binding
-                      (or this-name (gensym "THIS")) IFn))
-            bind (m-map (fn [[s t]] (make-binding s t :fnarg nil))
-                        (if (variadic? argv)
-                          (conj (:required-params argv)
-                                (:rest-param argv))
-                          (:required-params argv)))
-            _ (update-current-method assoc :loop-locals bind)
-            _ (set-val :loop-locals bind)
-            _ (set-val :want-unboxed (when (.isPrimitive ret-class)
-                                       ret-class))
-            body (analyze `(~'do ~@body))
-            m current-method
-            _ pop-frame]
-        [(assoc m
-                :argv argv
-                :bind bind
-                :this thisb)
-                body]))))
-
 ;; Should change to defmulti
 ;; TODO serialization with print/read
 (defn gen-constant
@@ -756,12 +508,12 @@
     (println "Unknown constant" c)))
 
 (defn emit-constants [obj cref mref]
-  (doseq [{:keys [val java-type obj orig]} (:constants obj)]
+  (doseq [{:keys [cfield gen-type obj lit-val]} (:constants obj)]
 ;    (println "Const type=" java-type "orig=" orig)
     (asm/emit cref mref
-      `(~@(gen-constant orig)
-        ~@(if java-type [[:checkcast java-type]])
-        [:putstatic [~obj ~val ~(or java-type Object)]]))))
+      `(~@(gen-constant lit-val)
+        ;~@(if java-type [[:checkcast java-type]])
+        [:putstatic [~obj ~cfield ~(class lit-val)]]))))
 
 ;; TODO: defmulti --> deftypes also
 (defn emit-methods [{:keys [variadic-arity] :as obj} cref]
@@ -774,20 +526,19 @@
         `([:ldc ~(int variadic-arity)]
           [:ireturn]))
       (asm/assemble-method mref)))
-  (doseq [[info body :as mm] (:methods obj)]
-    (let [{:keys [argv bind this loop-label]} info
-          variadic? (variadic? argv)]
-      (let [mref (asm/add-method cref
+  (doseq [{:keys [argv bind this loop-label body] :as mm} (:methods obj)]
+    (let [variadic? (variadic? argv)
+          mref (asm/add-method cref
                    {:name (if variadic? 'doInvoke 'invoke)
                     :descriptor [:method Object
                                  (repeat (count bind) Object)]
                     :params (map :label bind)
                     :flags #{:public}
                     :throws [Exception]})]
-        (asm/emit1 cref mref [:label loop-label])
-        (asm/emit cref mref (gen body))
-        (asm/emit1 cref mref [:areturn])
-        (asm/assemble-method mref)))))
+      (asm/emit1 cref mref [:label loop-label])
+      (asm/emit cref mref (gen body))
+      (asm/emit1 cref mref [:areturn])
+      (asm/assemble-method mref))))
 
 (defn compile-class
   "Compile and load the class representing
@@ -800,9 +551,9 @@
                       :flags #{:public :super :final}}]
     ;; static fields for constants
     (doseq [fld (:constants obj)]
-      (let [{:keys [val java-type]} fld]
-        (asm/add-field c {:name val
-                          :descriptor (or java-type Object)
+      (let [{:keys [cfield lit-val]} fld]
+        (asm/add-field c {:name cfield
+                          :descriptor (class lit-val)
                           :flags #{:public :final :static}})))
 
     ;; static init for constants, keywords and vars
@@ -815,14 +566,14 @@
 
     ;; instance fields for closed-overs
     (doseq [[sym bind] (:closed-lexicals obj)]
-      (let [{:keys [java-type]} bind]
+      (let [{:keys [gen-type]} bind]
         (asm/add-field c {:name sym
-                          :descriptor java-type
+                          :descriptor gen-type
                           :flags #{:public :final}})))
 
     (let [clos (:closed-lexicals obj)
           clos-names (keys clos)
-          clos-types (map :java-type (vals clos))]
+          clos-types (map :gen-type (vals clos))]
       ;; ctor that takes closed-overs and inits base + fields
       ;; TODO: ctors that take metadata, deftype ctors
       (let [init (asm/add-method c {:name '<init>
@@ -914,9 +665,9 @@
 
                (let [[top _] (current-object context)]
                  (doseq [fld (:constants top)]
-                   (let [{:keys [val java-type]} fld]
+                   (let [{:keys [val gen-type]} fld]
                      (asm/add-field ns-init {:name val
-                                             :descriptor java-type
+                                             :descriptor gen-type
                                              :flags #{:public :final :static}})))
            ;; TODO inits in blocks of 100...
                  (let [init-const (asm/add-method ns-init

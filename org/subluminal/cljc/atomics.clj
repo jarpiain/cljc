@@ -53,6 +53,7 @@
 (defmethod gen ::constant
   [{:keys [gen-type lit-val obj cfield]}]
   {:pre [(or (= gen-type Void/TYPE) (= gen-type (class lit-val)))]}
+  (println "fetch-const" [:getstatic ~[obj cfield (class lit-val)]])
   (if (= gen-type Void/TYPE)
     ()
     `([:getstatic ~[obj cfield (class lit-val)]]

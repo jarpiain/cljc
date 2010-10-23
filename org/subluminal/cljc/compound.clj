@@ -123,7 +123,7 @@
 ;; label is used only for the 'this' local of fn methods
 (defn make-binding
   [sym stype gtype kind lbl]
-  {:pre [(do (println "make-bind" stype gtype) (gen-contract stype gtype))]}
+  {:pre [(gen-contract stype gtype)]}
   (fn [ctx]
    (let [b {:symbol sym
             :label (or lbl (gensym "LB__"))

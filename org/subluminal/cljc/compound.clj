@@ -637,15 +637,77 @@
 
 (defmethod eval-toplevel ::static-method
   [{:keys [target-class member member-name args]} loader]
-  (let [args (into-array Object (map #(eval-toplevel % loader) args))]
+  (let [argvals (map #(eval-toplevel % loader) args)]
     (if member
-      (.invoke member nil args)
-      (Reflector/invokeStaticMethod target-class member-name args))))
+      (.invoke member nil
+               (box-args (.getParameterTypes member) argvals))
+      (Reflector/invokeStaticMethod target-class member-name
+                                    (into-array Object argvals)))))
 
 (defmethod eval-toplevel ::instance-method
   [{:keys [target member member-name args]} loader]
   (let [inst (eval-toplevel target loader)
-        args (into-array Object (map #(eval-toplevel % loader) args))]
+        argvals (map #(eval-toplevel % loader) args)]
     (if member
-      (.invoke member inst args)
-      (Reflector/invokeInstanceMethod inst member-name args))))
+      (.invoke member inst
+               (box-args (.getParameterTypes member) argvals))
+      (Reflector/invokeInstanceMethod inst member-name
+                                      (into-array Object argvals)))))
+
+;;;; New
+
+(defmethod analyze [::special 'new]
+  [pos typ _ [_ cls & ctor-args :as form]]
+  (if (< (count form) 2)
+    (throw (Exception. (str "Wrong number of arguments, "
+                            "expecting (new Classname args...)")))
+    (let [^Class c (maybe-class *ns* cls false)
+          tag (tag-class *ns* (tag-of form))]
+      (if-not c
+        (throw (IllegalArgumentException.
+                 (str "Unable to resolve classname: " cls)))
+        (run [args (m-map (partial analyze :expression true nil) ctor-args)]
+          (let [ctors (filter (fn [^Constructor ctor]
+                                (== (count (.getParameterTypes ctor))
+                                    (count args)))
+                              (.getConstructors c))
+                match
+                (cond
+                  (empty? ctors)
+                  (throw (Exception. (str "No matching ctor found for " c)))
+                  (empty? (next ctors))
+                  (first ctors)
+                  :else
+                  (matching-constructor (map :gen-type args) ctors))
+                gen-type (member-type c typ tag)]
+            {::etype ::new
+             :gen-type gen-type
+             :source-type c
+             :ctor match
+             :args args}))))))
+
+(defmethod gen ::new
+  [{:keys [^Class source-type ^Class gen-type ^Constructor ctor args]}]
+  (if ctor
+    `([:new ~source-type]
+      [:dup]
+      ~@(mapcat (fn [typ arg]
+                  `(~@(gen arg)
+                    ~@(gen-coerce (:gen-type arg) typ)))
+                (seq (.getParameterTypes ctor)) args)
+      [:invokespecial ~ctor]
+      ~@(gen-convert source-type gen-type))
+    `([:ldc ~(.getName source-type)]
+      [:invokestatic ~[Class 'forName [:method Class [String]]]]
+      ~@(gen-array args)
+      [:invokestatic ~[Reflector 'invokeConstructor
+                       [:method Object [Class [:array Object]]]]]
+      ~@(gen-convert Object gen-type))))
+
+(defmethod eval-toplevel ::new
+  [{:keys [^Constructor ctor ^Class source-type args]} loader]
+  (let [argvals (map #(eval-toplevel % loader) args)]
+    (if ctor
+      (.newInstance ctor (box-args (.getParameterTypes ctor) argvals))
+      (Reflector/invokeConstructor source-type
+                                   (into-array Object argvals)))))

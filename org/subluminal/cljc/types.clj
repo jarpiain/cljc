@@ -201,6 +201,20 @@
     `(~@(boxit gen)
       ~@(unbox-it need))))
 
+(defn box-args
+  [types argvals]
+  (into-array Object (map (fn [typ arg]
+                            (if (ref-type? typ) arg
+                              (condp = typ
+                                Boolean/TYPE (boolean arg)
+                                Character/TYPE (char arg)
+                                Byte/TYPE (byte arg)
+                                Short/TYPE (short arg)
+                                Integer/TYPE (int arg)
+                                Long/TYPE (long arg)
+                                Float/TYPE (float arg)
+                                Double/TYPE (double arg))))
+                          (seq types) argvals)))
 
 ;; --> unboxed values on stack
 (defn gen-args [ptypes args]

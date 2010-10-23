@@ -274,37 +274,6 @@
 
 ;;;; Arg type matching
 
-;; Why is Reflector/boxArgs not public?
-(defn box-args [cls avals]
-  (amap avals i _
-        (let [^Class aclass (aget cls i)
-              aval (aget avals i)]
-          (cond
-            (not (.isPrimitive aclass))
-            (.cast aclass aval)
-            (= aclass Boolean/TYPE)
-            (.cast Boolean/TYPE aval)
-            (= aclass Character/TYPE)
-            (.cast Character/TYPE aval)
-            :else
-            (if (number? aval)
-              (cond
-                (= aclass Byte/TYPE)
-                (.byteValue ^Number aval)
-                (= aclass Short/TYPE)
-                (.shortValue ^Number aval)
-                (= aclass Integer/TYPE)
-                (.intValue ^Number aval)
-                (= aclass Long/TYPE)
-                (.longValue ^Number aval)
-                (= aclass Float/TYPE)
-                (.floatValue ^Number aval)
-                (= aclass Double/TYPE)
-                (.doubleValue ^Number aval))
-              (throw (IllegalArgumentException.
-                       (str "Unexpected param type, expected "
-                            aclass ", given: " (.getName (class aval))))))))))
-
 (defn subsumes [^"[Ljava.lang.Class;" left
                 ^"[Ljava.lang.Class;" right]
   (areduce left i ret false

@@ -1325,6 +1325,8 @@
 
 (defn utf-to-pool [s]
   {:pre [(instance? String s)]}
+  (if (.contains s "Indexed")
+    (throw (Exception. s)))
   (fn [tab]
     (if-let [idx (get (:utf tab) s)]
       [idx tab]

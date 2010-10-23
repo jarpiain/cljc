@@ -1,5 +1,38 @@
 (in-ns 'org.subluminal.compiler)
-(declare maybe-class)
+
+;;;; Manipulating lexical context
+
+(defn current-method [ctx]
+  [(get (:index ctx) (:method ctx)) ctx])
+
+(defn update-current-method [f & args]
+  (fn [ctx]
+    [nil (apply update-in ctx [:index (:method ctx)] f args)]))
+
+(defn current-object [ctx]
+  [(get (:index ctx) (:fn ctx)) ctx])
+
+(defn push-frame []
+  (fn [ctx]
+    [nil (assoc ctx :parent ctx)]))
+
+(defn pop-frame [ctx]
+  [nil (assoc (:parent ctx)
+              :binding-sites (:binding-sites ctx)
+              :index (:index ctx))])
+
+(defn push-clear-node [kind root?]
+  (fn [ctx]
+    (let [tag (gensym "NN")]
+      [nil
+       (assoc ctx
+              :parent ctx
+              :clear-tag tag
+              :clear-path ctx
+              :clear-kind kind
+              :clear-root (if root? tag (:clear-root ctx)))])))
+
+;;;; Namespace lookup
 
 (defn namespace-for
   ([sym] (namespace-for *ns* sym))
@@ -8,84 +41,6 @@
          n (or (get (ns-aliases inns) nssym)
                (find-ns nssym))]
      n)))
-
-;; Try to resolve (in order):
-;; 1. fully.qualified.Class or [LArrayClass;
-;;    -> Class object or ClassNotFoundException
-;; 2. always resolve the symbols 'ns and 'in-ns in ns clojure.core
-;; (2b. compiler-stub)
-;; 3. ns-map of rel-ns
-;;    -> interned Var, referred Var
-;;       or imported Class
-;; (3b. *allow-unresolved-vars*)
-;; 4. throw "unable to resolve"
-;;       
-;; Not using ns-resolve since that fn delegates to clojure.lang.Compiler
-(defn resolve-unqualified [^Namespace rel-ns sym]
-  (cond
-    (or (>= (.indexOf (name sym) (int \.)) 0) (= (.charAt (name sym) 0) \[))
-    (RT/classForName (name sym))
-    
-    (= sym 'ns) #'clojure.core/ns
-    (= sym 'in-ns) #'clojure.core/in-ns
-
-    :else
-    (if-let [o (.getMapping rel-ns sym)]
-      o
-      (throw (Exception. (str "Unable to resolve " sym
-                              " in this context"))))))
-
-;; Try to resolve (in order):
-;; 1. ns-alias/interned-var
-;;    or qualified.ns/interned-var
-;;    -> Var or throw if not found and public
-;; 2. fully.qualified.Class/staticField
-;;    or ImportedClass/staticField
-;;    -> java.reflect.Field or throw if no such field
-;; 3. throw "no such namespace"
-(defn resolve-qualified [^Namespace rel-ns sym]
-  (let [ns-part (symbol (namespace sym))
-        ns-for (or (.lookupAlias rel-ns ns-part)
-                   (Namespace/find ns-part))]
-    (if ns-for
-      (let [v (.findInternedVar ns-for (symbol (name sym)))]
-        (cond
-          (nil? v)
-          (throw (Exception. (str "No such var: " sym)))
-          (and (not= ns-for rel-ns) (not (.isPublic v)))
-          (throw (IllegalStateException.
-                   (str "var: " sym " is not public")))
-          :else v))
-      (if-let [^Class c (maybe-class rel-ns ns-part false)]
-        (if-let [f (Reflector/getField c (name sym) true)]
-          ;; TODO: should be same as (. Class staticField)
-          {::etype ::static-field
-           :target c
-           :member f
-           :java-type (.getType f)
-           :unbox-type (.getType f)
-           :tag nil}
-          (throw (Exception. (str "Unable to find static field: " (name sym)
-                                  " in " c))))
-        (throw (Exception. (str "No such namespace: " ns-part)))))))
-
-(defn resolve-sym [n sym]
-  (if (namespace sym)
-    (resolve-qualified n sym)
-    (resolve-unqualified n sym)))
-
-;; used in (analyze ::symbol)
-(defn lookup-sym [n sym]
-  (let [o (resolve-sym n sym)]
-    (cond
-      (var? o)
-      (if (.isMacro o)
-        (throw (Exception. "Can't take value of a macro: " o))
-        (register-var o))
-      (class? o)
-      (register-constant o)
-      :else
-      (with-monad state-m (m-result o)))))
 
 ;; used in (def sym ...) and (var sym)
 (defn lookup-var [rel-ns sym intern?]
@@ -229,7 +184,7 @@
   "Try to interpret the :tag metadata of an object as a Class"
   [nss tag]
   (if (nil? tag)
-    Object
+    nil
     (if-let [c (prim-class tag)]
       c
       (tag-to-class nss tag))))
@@ -245,7 +200,7 @@
       (symbol tag)
       :else nil)))
 
-;; Macro expansion.
+;;;; Macro expansion
 ;; macroexpand exists in clojure.core
 ;; but just delegates to clojure.lang.Compiler
 
@@ -253,9 +208,9 @@
   #{'if 'let* 'loop* 'fn* 'recur 'quote
     'var 'def 'monitor-enter 'monitor-exit
     'throw 'try 'catch 'finally 'new '.
+    'clojure.core/import*
     ;; TODO:
-    'clojure.core/import* 'case*
-    'letfn* 'set! 'deftype* 'reify* '&})
+    'case* 'letfn* 'set! 'deftype* 'reify* '&})
 
 (defn macroexpand1-impl
   [nss env form]

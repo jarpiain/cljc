@@ -76,7 +76,7 @@
 ;; the two types should satisfy this
 (defn analyze-contract [want have]
   (or (true? want)
-      (= have Void/TYPE) ; statement position
+      (and (= have Void/TYPE) (= want Void/TYPE))
       (and (nil? want) (ref-type? have))
       (and (prim-type? want)
            (or (ref-type? have)
@@ -212,13 +212,14 @@
 
 ;; --> Object[]
 (defn gen-array [args]
-  `([:ldc ~(int (count args))]
+  `([:sipush ~(short (count args))]
     [:anewarray ~Object]
     ~@(mapcat (fn [arg i]
                 `([:dup]
                   [:sipush ~(short i)]
                   ~@(gen arg)
-                  ~@(boxit (:gen-type arg))
+                  ~@(when (prim-type? (:gen-type arg))
+                      (list (boxit (:gen-type arg))))
                   [:aastore]))
               args
               (range))))

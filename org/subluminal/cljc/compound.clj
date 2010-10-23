@@ -102,7 +102,7 @@
     (analyze pos typ nil (first body))
 
     :else
-    (run [stmts (m-map (partial analyze :statement nil nil) (butlast body))
+    (run [stmts (m-map (partial analyze :statement Void/TYPE nil) (butlast body))
           tail (analyze pos typ nil (last body))]
       {::etype ::do
        :gen-type (:gen-type tail)
@@ -324,7 +324,7 @@
     'finally
     (run [_ (push-frame)
           _ (set-val :catching true)
-          body (analyze :statement nil nil `(~'do ~@args))
+          body (analyze :statement Void/TYPE nil `(~'do ~@args))
           _ pop-frame]
       {::etype ::finally
        :body body})))
@@ -416,7 +416,7 @@
                    :gen-type (cond
                                (= pos :statement)
                                Void/TYPE
-                               (and (analyze-contract typ tag)
+                               (and tag (analyze-contract typ tag)
                                     (gen-contract Object tag))
                                tag
                                :else Object)}))]
@@ -445,7 +445,10 @@
         eargs (doall (map #(eval-toplevel % loader) args))]
     (apply eop eargs)))
 
-;;;; Host expressions
+;;;; Member access expressions
+
+(derive ::static-field ::assignable)
+(derive ::static-method ::assignable)
 
 (defn member-type
   "Determine the type of a member expression
@@ -493,6 +496,51 @@
          :gen-type gen-type
          :source-type source-type}))))
 
+(defn analyze-method-call
+  [form ^Class c inst member args type-req]
+  (let [sym (if (symbol? member)
+              member
+              (symbol (name member)))
+        tag (tag-class *ns* (tag-of form))]
+    (if c
+      (let [methods (Reflector/getMethods c (count args) (name sym) true)
+            ^Method the-method
+            (cond
+              (empty? methods)
+              (throw (Exception. (str "No matching method: " member)))
+              (== (count methods) 1)
+              (first methods)
+              :else
+              (matching-method (map :gen-type args) methods))
+            source-type (if the-method (.getReturnType the-method) Object)
+            gen-type (member-type source-type type-req tag)]
+        {::etype ::static-method
+         :target-class c
+         :args args
+         :member the-method
+         :member-name member
+         :source-type source-type
+         :gen-type gen-type})
+      (let [c (or (:gen-type inst) Object)
+            methods (Reflector/getMethods c (count args) (name sym) false)
+            ^Method the-method
+            (cond
+              (empty? methods) nil
+              (== (count methods) 1)
+              (first methods)
+              :else
+              (matching-method (map :gen-type args) methods))
+            source-type (if the-method (.getReturnType the-method) Object)
+            gen-type (member-type source-type type-req tag)]
+        {::etype ::instance-method
+         :target inst
+         :target-class c
+         :args args
+         :member the-method
+         :member-name (munge-impl (name sym))
+         :gen-type gen-type
+         :source-type source-type}))))
+
 (defmethod analyze [::special '.]
   [pos typ _ [_ target member & args :as form]]
   (if (< (count form) 3)
@@ -507,7 +555,7 @@
                 (and (seq? member) (seq args)))
         (throw (Exception. "Malformed member expression")))
       (run [inst (if c (m-result nil) (analyze :expression nil nil target))
-            argl (m-map (partial :expression true nil) argl)]
+            argl (m-map (partial analyze :expression true nil) argl)]           
         (let [field? (when (and field? (not (keyword? memb)))
                        (if c
                          (empty? (Reflector/getMethods
@@ -518,7 +566,7 @@
               typ (if (= pos :statement) Void/TYPE typ)]
           (if field?
             (analyze-field form c inst memb typ)
-            (analyze-java-method form c inst memb argl typ)))))))
+            (analyze-method-call form c inst memb argl typ)))))))
 
 (defmethod gen ::static-field
   [{:keys [target source-type gen-type member]}]
@@ -537,3 +585,67 @@
       [:invokestatic ~[Reflector 'invokeNoArgInstanceMember
                        [:method Object [Object String]]]]
       ~@(gen-convert source-type gen-type))))
+
+(defmethod eval-toplevel ::static-field
+  [{:keys [^Field member]} loader]
+  (.get member nil))
+
+(defmethod eval-toplevel ::instance-field
+  [{:keys [target target-class ^Field member member-name]} loader]
+  (let [inst (eval-toplevel target loader)]
+    (if member
+      (.get member inst)
+      (Reflector/invokeNoArgInstanceMember inst member-name))))
+
+(defmethod gen ::static-method
+  [{:keys [target-class member member-name gen-type source-type args]}]
+  (if member
+    `(~@(mapcat (fn [typ arg]
+                  `(~@(gen arg)
+                    ~@(gen-coerce (:gen-type arg) typ)))
+                (seq (.getParameterTypes member))
+                args)
+      [:invokestatic ~member]
+      ~@(gen-convert source-type gen-type))
+    ;; Need reflection
+    `([:ldc ~(.getName target-class)]
+      [:invokestatic ~[Class 'forName [:method Class [String]]]]
+      [:ldc ~member-name]
+      ~@(gen-array args)
+      [:invokestatic ~[Reflector 'invokeStaticMethod
+                       [:method Object [Class String [:array Object]]]]]
+      ~@(gen-convert Object gen-type))))
+
+(defmethod gen ::instance-method
+  [{:keys [target member member-name gen-type source-type args]}]
+  (if member
+    `(~@(gen target)
+      ~@(mapcat (fn [typ arg]
+                  `(~@(gen arg)
+                    ~@(gen-coerce (:gen-type arg) typ)))
+                (seq (.getParameterTypes member))
+                args)
+      [:invokevirtual ~member]
+      ~@(gen-convert source-type gen-type))
+    ;; Need reflection
+    `(~@(gen target)
+      [:ldc ~member-name]
+      ~@(gen-array args)
+      [:invokestatic ~[Reflector 'invokeInstanceMethod
+                       [:method Object [Object String [:array Object]]]]]
+      ~@(gen-convert Object gen-type))))
+
+(defmethod eval-toplevel ::static-method
+  [{:keys [target-class member member-name args]} loader]
+  (let [args (into-array Object (map #(eval-toplevel % loader) args))]
+    (if member
+      (.invoke member nil args)
+      (Reflector/invokeStaticMethod target-class member-name args))))
+
+(defmethod eval-toplevel ::instance-method
+  [{:keys [target member member-name args]} loader]
+  (let [inst (eval-toplevel target loader)
+        args (into-array Object (map #(eval-toplevel % loader) args))]
+    (if member
+      (.invoke member inst args)
+      (Reflector/invokeInstanceMethod inst member-name args))))

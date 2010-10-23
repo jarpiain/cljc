@@ -2,29 +2,6 @@
 
 ;;;; Atomic expressions
 
-(defn tea "Test analysis"
-  ([form] (tea form :expression nil))
-  ([form pos typ] (tea form pos typ (DynamicClassLoader.)))
-  ([form pos typ loader]
-   (let [[res ctx]
-         (run-with (assoc null-context :loader loader)
-           [_ (push-object-frame {:name 'toplevel})
-            a (analyze pos typ nil form)
-            _ pop-frame]
-           a)]
-     res)))
-
-(defn teg "Test gen"
-  ([form] (gen (tea form)))
-  ([form pos] (gen (tea form pos nil)))
-  ([form pos typ] (gen (tea form pos typ))))
-
-(defn tee 
-  "Test eval-toplevel"
-  [form]
-  (let [ldr (DynamicClassLoader.)]
-    (eval-toplevel (tea form :eval nil ldr) ldr)))
-
 ;;;; Literal objects embedded in the source form
 ;;;; that don't fall into one of the more specific types
 ;;;; Cannot be of primitive type
@@ -39,11 +16,11 @@
     :else (class c)))
 
 (defn register-constant
-  [pos obj]
+  [req obj]
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))
           typ (const-source-type obj)
-          gen-type (if (= pos :statement) Void/TYPE typ)]
+          gen-type (if (= req Void/TYPE) req typ)]
       (if-let [c (get (:constant-ids curr-obj) obj)]
         [(assoc c :gen-type gen-type) ctx]
         (let [typ (const-source-type obj)
@@ -59,7 +36,7 @@
 
 (defmethod analyze ::constant
   [pos typ _ obj]
-  (register-constant pos obj))
+  (register-constant typ obj))
 
 (defmethod gen ::constant
   [{:keys [gen-type source-type obj cfield]}]
@@ -76,10 +53,11 @@
 ;;;; nil literal
 
 (defmethod analyze ::null
-  [pos _ _ form]
+  [pos typ _ form]
+  ;(println "Nil literal:" pos typ)
   (run []
     {::etype ::null
-     :gen-type (if (= pos :statement) Void/TYPE nil)}))
+     :gen-type (if (= typ Void/TYPE) typ nil)}))
 
 (defmethod gen ::null
   [{:keys [gen-type]}]
@@ -101,7 +79,7 @@
      :source-type Boolean/TYPE
      :gen-type
      (cond
-       (= pos :statement)
+       (= typ Void/TYPE)
          Void/TYPE
        (or (true? typ)
            (= typ Boolean/TYPE))
@@ -144,7 +122,7 @@
 (defmethod analyze ::number
   [pos typ _ form]
   (let [nval (promote-literal form)]
-    (if (or (= pos :statement)
+    (if (or (= typ Void/TYPE)
             (and (instance? Long nval)
                  (or (true? typ) (= typ Long/TYPE)))
             (and (instance? Double nval)
@@ -154,8 +132,8 @@
           {::etype ::number
            :lit-val nval
            :source-type styp
-           :gen-type (if (= pos :statement) Void/TYPE styp)}))
-      (register-constant pos nval))))
+           :gen-type (if (= typ Void/TYPE) typ styp)}))
+      (register-constant typ nval))))
 
 (def
   ^{:private true
@@ -200,7 +178,7 @@
 
 (defmethod analyze ::string
   [pos typ _ ^String form]
-  (register-constant pos (.intern form)))
+  (register-constant typ (.intern form)))
 
 ;; gen, eval-toplevel --> ::constant
 
@@ -280,15 +258,15 @@
                             (assoc b :kind :closed
                                      :place (:name (get :index ctx) obj)))))))))
 
-(defn register-var [pos v]
+(defn register-var [typ v]
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [prev (get (:vars curr-obj) v)]
-        [(assoc prev :gen-type (if (= pos :statement)
+        [(assoc prev :gen-type (if (= typ Void/TYPE)
                                  Void/TYPE
                                  (:gen-type prev)))
          ctx]
-        (let [[c ctx] ((register-constant pos v) ctx)
+        (let [[c ctx] ((register-constant typ v) ctx)
               vv (assoc c ::etype ::var
                           :gen-type Object)]
           [vv (update-in ctx [:index (:fn ctx) :vars]
@@ -368,15 +346,15 @@
     (resolve-qualified n sym)
     (resolve-unqualified n sym)))
 
-(defn lookup-sym [pos n sym]
+(defn lookup-sym [typ n sym]
   (let [o (resolve-sym n sym)]
     (cond
       (var? o)
       (if (.isMacro o)
         (throw (Exception. (str "Can't take value of a macro: " o)))
-        (register-var pos o))
+        (register-var typ o))
       (class? o)
-      (register-constant pos o)
+      (register-constant typ o)
       :else
       (with-monad state-m (m-result o)))))
 
@@ -387,12 +365,12 @@
           lex (resolve-lexical sym)
           bind (if lex
                  (make-binding-instance lex hint)
-                 (lookup-sym pos *ns* sym))]
+                 (lookup-sym typ *ns* sym))]
       (condp = (::etype bind)
         ::local-binding
         (let [gen-type (:gen-type bind)
               gen-type (cond
-                         (= pos :statement) Void/TYPE
+                         (= typ Void/TYPE) Void/TYPE
                          (not (analyze-contract typ gen-type))
                          (do
                            ;; warn about inappropriate primitive type hint
@@ -403,7 +381,7 @@
         ::var
         (let [gen (or hint (:gen-type bind))
               gen (cond
-                    (= pos :statement) Void/TYPE
+                    (= typ Void/TYPE) Void/TYPE
                     (not (analyze-contract typ gen))
                     (boxed-version gen gen)
                     :else gen)]
@@ -414,7 +392,7 @@
         ; warn about type hint?
         (let [gen (:gen-type bind)
               gen (cond
-                    (= pos :statement)
+                    (= typ Void/TYPE)
                     Void/TYPE
                     (not (analyze-contract typ gen))
                     (boxed-version gen gen)
@@ -441,7 +419,7 @@
   [{:keys [kind gen-type source-type label live place]}]
   {:pre [(gen-contract source-type gen-type)]}
   (cond
-    (is-primitive? source-type) ()
+    (prim-type? source-type) ()
     (= kind :closed) nil ; TODO: :once fns
     @live nil
     :else (list [:iconst-0] [:istore label])))
@@ -462,7 +440,7 @@
   [pos typ _ [_ vname :as form]]
   (let [v (lookup-var *ns* vname false)]
     (if v
-      (run [cv (register-var pos v)]
+      (run [cv (register-var typ v)]
         (assoc cv ::etype ::the-var :gen-type Var))
       (throw (Exception. (str "Unable to resolve var: " vname
                               " in this context"))))))
@@ -471,29 +449,29 @@
 
 (derive ::keyword ::constant)
 
-(defn register-keyword [pos kw]
+(defn register-keyword [typ kw]
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))]
       (if-let [prev (get (:keywords curr-obj) kw)]
         [(assoc prev :gen-type
-                     (if (= pos :statement)
+                     (if (= typ Void/TYPE)
                        Void/TYPE
                        (:gen-type prev)))
          ctx]
-        (let [[c ctx] ((register-constant pos kw) ctx)
+        (let [[c ctx] ((register-constant typ kw) ctx)
               k (assoc c ::etype ::keyword)]
           [k (update-in ctx [:index (:fn ctx) :keywords]
                         assoc kw k)])))))
 
 (defmethod analyze ::keyword
   [pos typ _ kw]
-  (register-keyword pos kw))
+  (register-keyword typ kw))
 
 ;;;; Quote special form
 
 (defmethod analyze [::special 'quote]
   [pos typ _ [_ obj]]
-  (register-constant pos obj))
+  (register-constant typ obj))
 
 ;;;; Empty collections
 
@@ -506,7 +484,7 @@
     {::etype ::empty
      :gen-type
      (cond
-       (= pos :statement) Void/TYPE
+       (= typ Void/TYPE) Void/TYPE
        (vector? coll) IPersistentVector
        (set? coll) IPersistentSet
        (map? coll) IPersistentMap
@@ -536,7 +514,7 @@
     (throw (Exception. (str "Expected (import* class-name), got: " cname)))
     (run []
       {::etype ::import
-       :gen-type (if (= pos :statement) Void/TYPE Class)
+       :gen-type (if (= typ Void/TYPE) Void/TYPE Class)
        :target cname})))
 
 (defmethod gen ::import

@@ -598,7 +598,7 @@
 (defn bits
   "Returns the number of 1 bits in the non-negative int n"
   [n]
-  {:pre (not (neg? n))}
+  {:pre [(not (neg? n))]}
   (loop [c (int 0) x (int n)]
     (if (zero? x)
       c

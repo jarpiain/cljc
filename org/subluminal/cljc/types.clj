@@ -2,8 +2,11 @@
 
 ;;;; Utilities related mostly to casting and coercing between types
 
+#_(def Bottom (class (fn Bottom [])))
+
 (defn prim-type? [^Class c]
-  (and c (.isPrimitive c) (not (= c Void/TYPE))))
+  (or #_(= c Bottom)
+      (and c (.isPrimitive c) (not (= c Void/TYPE)))))
 
 (defn ref-type? [^Class c]
   (or (nil? c)
@@ -57,6 +60,7 @@
   [^Class from ^Class to]
   (cond
     (= to Void/TYPE) true
+    ;(= from Bottom) true
     (= from to) (prim-type? from)
     (= to Long/TYPE)
     (or (= from Integer/TYPE)
@@ -75,7 +79,7 @@
 ;; and the result has :gen-type 'have,
 ;; the two types should satisfy this
 (defn analyze-contract [want have]
-  (or (true? want)
+  (or (true? want) #_(= have Bottom)
       (and (= have Void/TYPE) (= want Void/TYPE))
       (and (nil? want) (ref-type? have))
       (and (prim-type? want)
@@ -83,7 +87,7 @@
                (= want have)))))
 
 (defn gen-contract [source gen]
-  (or (ref-type? gen)
+  (or (ref-type? gen) #_(= source Bottom)
       (valid-promotion? source gen)))
 
 (def boxed-version
@@ -131,7 +135,7 @@
     (= prim Double/TYPE)
     [:invokestatic [RT 'doubleCast [:method :double [Object]]]]
     (= prim Character/TYPE)
-    [:invokestaitc [RT 'charCast [:method :char [Object]]]]
+    [:invokestatic [RT 'charCast [:method :char [Object]]]]
     (= prim Boolean/TYPE)
     [:invokestatic [RT 'booleanCast [:method :boolean [Object]]]]))
 
@@ -159,6 +163,7 @@
   [source gen]
   {:pre [(gen-contract source gen)]}
   (cond
+    ;(= source Bottom) ()
     (= gen Void/TYPE) (maybe-pop source)
     (= source gen) ()
     (ref-type? gen)
@@ -182,6 +187,7 @@
 (defn gen-coerce
   [gen need]
   (cond
+    ;(= gen Bottom) ()
     (= need Void/TYPE) (maybe-pop gen)
     (ref-type? need)
     (cond
@@ -195,11 +201,11 @@
     (valid-promotion? gen need)
     (gen-convert gen need)
     (ref-type? gen)
-    (unbox-it need)
+    (list (unbox-it need))
     ;; Lossy primitive conversion
     :else
-    `(~@(boxit gen)
-      ~@(unbox-it need))))
+    `(~(boxit gen)
+      ~(unbox-it need))))
 
 (defn box-args
   [types argvals]

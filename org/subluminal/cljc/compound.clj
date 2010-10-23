@@ -16,9 +16,11 @@
 (defn common-supertype [^Class l ^Class r]
   (cond
     (= l r) l
+    ;(= l Bottom) r
+    ;(= r Bottom) l
     (valid-promotion? l r) r
     (valid-promotion? r l) l
-    (or (is-primitive? l) (is-primitive? r))
+    (or (prim-type? l) (prim-type? r))
     (common-supertype (boxed-version l l) (boxed-version r r))
     ;; Both are ref types at this point
     (nil? l) r
@@ -47,7 +49,8 @@
           _ pop-frame]
       (let [left (:gen-type then)
             right (:gen-type else)
-            gen (if (= left right)
+            gen 
+            (if (= left right)
                   left
                   (common-supertype left right))]
         {::etype ::if
@@ -64,6 +67,8 @@
         [:ifeq ~elsel]
         ~@(gen then)
         ~@(gen-convert (:gen-type then) gen-type)
+        ;~@(when (not= (:gen-type then) Bottom)
+        ;    (list [:goto endl])) ; dead code avoidance
         [:goto ~endl]
         [:label ~elsel]
         ~@(gen else)
@@ -77,6 +82,9 @@
         [:if-acmpeq ~falsel]
         ~@(gen then)
         ~@(gen-convert (:gen-type then) gen-type)
+        ;~@(when (not= (:gen-type then) Bottom)
+        ;    (list [:goto endl]))
+        [:goto ~endl]
         [:label ~null]
         [:pop]
         [:label ~falsel]
@@ -119,6 +127,20 @@
 
 ;;;; Let / loop
 
+;; In this form, the inner if statement is analyzed in
+;; :return contest with void type request.
+;; Checking against pos = :statement when determining
+;; if gen-type should be void resulted in a stack height
+;; mismatch --> will check against typ = void instead
+(comment
+(def nasty-form '(fn [x]
+                   (cond
+                     true
+                     (do
+                       (loop [] (if true (recur) nil))
+                       x))
+                   nil)))
+
 ;; kind is :local :fnarg :closed
 ;; label is used only for the 'this' local of fn methods
 (defn make-binding
@@ -143,12 +165,12 @@
   [loop? hinted inferred]
   (cond
     (nil? hinted)
-    (if (or (is-primitive? inferred)
+    (if (or (prim-type? inferred)
             (not loop?))
       inferred
       Object)
 
-    (is-primitive? inferred)
+    (prim-type? inferred)
     (if hinted
       (throw (Exception. "Can't type hint a local with a primitive initializer"))
       inferred)
@@ -175,6 +197,7 @@
 
 (defn analyze-loop
   [pos typ [_ bindings & body :as form] loop?]
+  ;(println "Loop" pos typ)
   (cond
     (or (= pos :eval))
 ;        (and loop? (= pos :expression))
@@ -202,7 +225,7 @@
             _ (if loop? pop-frame (m-result nil))
             _ pop-frame] ; local bindings
         {::etype ::loop
-         :gen-type (:gen-type body)
+         :gen-type (if (= typ Void/TYPE) typ (:gen-type body))
          :bindings bindings
          :loop-label loop-label
          :body body}))))
@@ -223,13 +246,13 @@
         ~@(mapcat
             (fn [[lb init]]
               `(~@(gen init)
+                ~@(gen-convert (:gen-type init) (:source-type lb))
                 ~[(store-op (:source-type lb)) (:label lb)]))
             bindings)
         [:label ~loop-label]
         ~@(gen body)))))
 
 ;;;; Recur
-;; TODO: a :bottom pseudotype
 
 (defn- analyze-with-type [[form typ]]
   (analyze :expression typ nil form))
@@ -280,7 +303,7 @@
     (analyze pos typ nil `((~'fn* [] ~form)))
     (run [ex (analyze :expression nil nil ex)]
       {::etype ::throw
-       :gen-type (if (= pos :statement) Void/TYPE nil)
+       :gen-type (if (= typ Void/TYPE) Void/TYPE nil)
        :ex ex})))
 
 (defmethod gen ::throw
@@ -414,7 +437,7 @@
                    :op op
                    :args (doall args)
                    :gen-type (cond
-                               (= pos :statement)
+                               (= typ Void/TYPE)
                                Void/TYPE
                                (and tag (analyze-contract typ tag)
                                     (gen-contract Object tag))
@@ -455,6 +478,8 @@
   when a :tag hint and a request for a primitive
   type may be given"
   [source req hint]
+  {:post [(or % (= source Void/TYPE))]}
+  ;(println "member-type source" source "req" req "hint" hint)
   (cond
     (= req Void/TYPE) req
     (and hint (analyze-contract req hint)
@@ -463,7 +488,7 @@
     (analyze-contract req source)
     source
     (gen-contract source req)
-    req
+    (if req req (boxed-version source))
     :else (boxed-version source source)))
 
 (defn analyze-field [form ^Class c inst member type-req]
@@ -562,8 +587,7 @@
                                    c 0 (munge-impl (name memb)) true))
                          (empty? (Reflector/getMethods
                                    (or (:gen-type inst) Object) 0
-                                   (munge-impl (name memb)) false))))
-              typ (if (= pos :statement) Void/TYPE typ)]
+                                   (munge-impl (name memb)) false))))]
           (if field?
             (analyze-field form c inst memb typ)
             (analyze-method-call form c inst memb argl typ)))))))
@@ -618,6 +642,7 @@
 
 (defmethod gen ::instance-method
   [{:keys [target member member-name gen-type source-type args]}]
+  ;(println member-name "method-call" source-type "-->" gen-type)
   (if member
     `(~@(gen target)
       ~@(mapcat (fn [typ arg]
@@ -718,7 +743,7 @@
   [pos typ _ vect]
   (run [comps (m-map (partial analyze :expression nil nil) vect)
         res (if (every? #(isa? (::etype %) ::constant) comps)
-              (register-constant pos (vec (map :lit-val comps)))
+              (register-constant typ (vec (map :lit-val comps)))
               (m-result {::etype ::vector
                          :components comps
                          :gen-type (if (= typ Void/TYPE)
@@ -731,7 +756,7 @@
   [pos typ _ elts]
   (run [elts (m-map (partial analyze :expression nil nil) elts)
         res (if (every? #(isa? (::etype %) ::constant) elts)
-              (register-constant (set (map :lit-val elts)))
+              (register-constant typ (set (map :lit-val elts)))
               (m-result {::etype ::set
                          :elements elts
                          :gen-type (if (= typ Void/TYPE)
@@ -744,7 +769,7 @@
   (run [entries (m-map (partial analyze :expression nil nil)
                        (apply concat (seq entries)))
         res (if (every? #(isa? (::etype %) ::constant) entries)
-              (register-constant (apply array-map (map :lit-val entries)))
+              (register-constant typ (apply array-map (map :lit-val entries)))
               (m-result {::etype ::map
                          :entries entries
                          :gen-type (if (= typ Void/TYPE)
@@ -784,3 +809,100 @@
 (defmethod eval-toplevel ::map
   [{:keys [entries]} loader]
   (apply array-map (map #(eval-toplevel % loader) entries)))
+
+;;;; Synchronization
+
+(defmethod analyze [::special 'monitor-enter]
+  [pos typ _ [_ lockee]]
+  (run [lockee (analyze :expression nil nil lockee)]
+    {::etype ::monitor-enter
+     :lock lockee
+     :gen-type
+     (if (= typ Void/TYPE) typ nil)}))
+
+(defmethod analyze [::special 'monitor-exit]
+  [pos typ _ [_ lockee]]
+  (run [lockee (analyze :expression nil nil lockee)]
+    {::etype ::monitor-exit
+     :lock lockee
+     :gen-type
+     (if (= typ Void/TYPE) typ nil)}))
+
+(defmethod gen ::monitor-enter
+  [{:keys [lock gen-type]}]
+  `(~@(gen lock)
+    [:monitorenter]
+    ~@(gen-convert Void/TYPE gen-type)))
+
+(defmethod gen ::monitor-exit
+  [{:keys [lock gen-type]}]
+  `(~@(gen lock)
+    [:monitorexit]
+    ~@(gen-convert Void/TYPE gen-type)))
+
+(defmethod eval-toplevel ::monitor-enter
+  [{:keys [lock]} loader]
+  (monitor-enter (eval-toplevel lock loader)))
+
+(defmethod eval-toplevel ::monitor-exit
+  [{:keys [lock]} loader]
+  (monitor-exit (eval-toplevel lock loader)))
+
+;;;; Def
+
+(defmethod analyze [::special 'def]
+  [pos typ _ [_ target init :as form]]
+  (cond
+    (> (count form) 3)
+    (throw (Exception. "Too many arguments to def"))
+    (< (count form) 2)
+    (throw (Exception. "Too few arguments to def"))
+    (not (symbol? target))
+    (throw (Exception. "First argument to def must be a Symbol"))
+    :else
+    ;; compile-time intern
+    (let [^Var v (lookup-var *ns* target true)]
+      (if (nil? v)
+        (throw (Exception. "Can't refer to qualified var that doesn't exist"))
+        (let [v (cond
+                  (= (.ns v) *ns*) v
+                  (nil? (namespace target)) (intern *ns* target)
+                  :else (throw (Exception.
+                                 "Can't create defs outside of current ns")))
+              mm (meta target)]
+          (run [meta-expr (if mm
+                            (analyze (if (= pos :eval) pos :expression)
+                                     nil nil mm)
+                            (m-result nil))
+                init-expr (analyze (if (= pos :eval) pos :expression)
+                                   nil (name target) init)]
+            {::etype ::def
+             :metamap meta-expr
+             :target v
+             :gen-type (if (= typ Void/TYPE) typ Var)
+             :init init-expr
+             :init-provided? (== (count form) 3)}))))))
+
+(declare gen-constant)
+(defmethod gen ::def
+  [{:keys [metamap target init init-provided? gen-type]}]
+  `(~@(gen-constant target)
+    ~@(when metamap
+        `([:dup]
+          ~@(gen metamap)
+          [:checkcast ~IPersistentMap]
+          [:invokevirtual ~[Var 'setMeta [:method :void [IPersistentMap]]]]))
+    ~@(when init-provided?
+        `([:dup]
+          ~@(gen init)
+          [:invokevirtual ~[Var 'bindRoot [:method :void [Object]]]]))
+    ~@(gen-convert Var gen-type)))
+
+(defmethod eval-toplevel ::def
+  [{:keys [metamap target init init-provided?]} loader]
+  (let [the-var target]
+    (if init-provided?
+      (.bindRoot the-var (eval-toplevel init loader))
+      (if metamap
+        (reset-meta! the-var (eval-toplevel metamap loader))))
+    the-var))

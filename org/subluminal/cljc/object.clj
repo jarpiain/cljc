@@ -56,8 +56,7 @@
                   (list opts)
                   opts)]
     (run [enc current-object]
-      (let [_ (println "This-name" this-name "enc" (:name enc))
-            base-name (if enc
+      (let [base-name (if enc
                         (str (:name enc) "$")
                         (str (munge-impl (name (ns-name *ns*))) "$"))
             simple-name (if this-name
@@ -118,9 +117,16 @@
                      state)
                    (next remain))))))))
 
+(defn- variadic? [argv]
+  (not (nil? (:rest-param argv))))
+
+;; the assembler recognizes 'this as a special label
+(defn make-this-binding
+  [sym jtype]
+  (make-binding sym jtype jtype :fnarg 'this))
+
 (defn analyze-method
   [[argv & body]]
-  (println "Analyze-method" body)
   (if (not (vector? argv))
     (throw (IllegalArgumentException.
              "Malformed method, expected argument vector"))
@@ -159,9 +165,6 @@
 (def max-positional-arity 20)
 (def variadic-index (inc max-positional-arity))
 
-(defn- variadic? [argv]
-  (not (nil? (:rest-param argv))))
-
 (defn- arity [m]
   (count (:required-params (:argv m))))
 
@@ -175,11 +178,6 @@
         (throw (Exception. "Can't have 2 overloads with same arity"))
         (assoc arr n m)))))
 
-;; the assembler recognizes 'this as a special label
-(defn make-this-binding
-  [sym jtype]
-  (make-binding sym jtype jtype :fnarg 'this))
-
 (defmethod analyze [::special 'fn*]
   [pos typ name [op & opts :as form]]
   (run [classloader (fetch-val :loader)
@@ -192,7 +190,7 @@
         _ pop-frame
         initargs (m-map (partial analyze :expression true nil)
                         (map :symbol (vals (:closed-lexicals f))))]
-    (let [[variadic-info _] (meth variadic-index)
+    (let [variadic-info (meth variadic-index)
           variadic-arity (when variadic-info (arity variadic-info))]
       (when (and variadic-info
                  (some identity (subvec meth (inc variadic-arity)

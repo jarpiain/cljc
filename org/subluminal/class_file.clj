@@ -1325,8 +1325,6 @@
 
 (defn utf-to-pool [s]
   {:pre [(instance? String s)]}
-  (if (.contains s "Indexed")
-    (throw (Exception. s)))
   (fn [tab]
     (if-let [idx (get (:utf tab) s)]
       [idx tab]
@@ -2331,6 +2329,7 @@
           [stack-in stack-in]
           (vals code)))
 
+#_(require 'clojure.set)
 (defn method-stack-size [block-graph code labels extab]
   (let [init (into {0 0}
                    (for [{handler :handler-pc} extab]
@@ -2341,11 +2340,21 @@
                                (block-stack-size
                                  (block-code code (:neighbors block-graph) %)
                                  (stacks %))]
+                           #_(doseq [node (graph/get-neighbors block-graph %)]
+                             (when (and (contains? stacks node)
+                                        (not= (stacks node) out))
+                               (println "Stack mismatch" % "/" out
+                                        "-->" node "/" (stacks node))))
                            [high (merge stacks
                                    (zipmap (graph/get-neighbors block-graph %)
                                            (repeat out)))]))
                       (graph/lazy-walk block-graph (keys init) #{})))
         [siz exit] (calc init)]
+    #_(let [dead (clojure.set/difference
+                 (set (:nodes block-graph))
+                 (set (keys exit)))]
+      (when (seq dead)
+        (println "Dead code:" dead)))
     (reduce max siz)))
 
 (defn asm1 

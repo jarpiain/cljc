@@ -1,5 +1,5 @@
 (ns org.subluminal.compiler
-  (:refer-clojure :exclude [compile eval])
+  (:refer-clojure :exclude [load compile eval])
   (:import (java.io Reader InputStreamReader)
            (java.nio ByteBuffer)
            (java.nio.charset Charset)
@@ -22,7 +22,6 @@
 (def gen nil)
 (def analyze nil)
 (def eval-toplevel nil)
-(def *debug-inspect* false)
 
 (declare syncat)
 
@@ -43,7 +42,9 @@
 
   The name argument is used to name the class generated from
   a fn* form."
-  (fn [position type-req name form] (syncat form))
+  (fn [position type-req name form]
+    ;(println "Analyzing" form "in pos" position "with type" type-req)
+    (syncat form))
   :default ::invocation)
 
 (defmulti gen
@@ -67,10 +68,11 @@
   [form _]
   (throw (Exception. (str "Can't eval " (::etype form) " form"))))
 
-(load "cljc/util")
-(load "cljc/atomics")
-(load "cljc/compound")
-(load "cljc/object")
+(clojure.core/load "cljc/util")
+(clojure.core/load "cljc/types")
+(clojure.core/load "cljc/atomics")
+(clojure.core/load "cljc/compound")
+(clojure.core/load "cljc/object")
 
 (comment
 (defstruct context
@@ -154,23 +156,6 @@
       (set? x) ::set
       :else ::constant)))
 
-;;;; Primitives/boxing
-(defn return-op [jt]
-  (cond
-    (= jt Long/TYPE) :lreturn
-    (= jt Double/TYPE) :dreturn
-    :else :areturn))
-
-(defn gen-array [objects]
-  `([:ldc ~(int (count objects))]
-    [:anewarray ~Object]
-    ~@(mapcat (fn [obj i]
-                `([:dup]
-                  [:ldc ~(int i)]
-                  ~@(gen obj)
-                  [:aastore]))
-              objects (range (count objects)))))
-
 (declare gen-constant)
 (defn gen-constant-array [objects]
   `([:ldc ~(int (count objects))]
@@ -182,114 +167,37 @@
                   [:aastore]))
               objects (range (count objects)))))
 
-;;;; synchronization
+;;;; Debugging
 
-(defmethod analyze [::special 'monitor-enter]
-  [[_ lockee]]
-  (run
-    [pos (set-val :position :expression)
-     jt (set-val :want-unboxed nil)
-     lockee (analyze lockee)
-     _ (set-val :position pos)]
-    {::etype ::monitor-enter
-     :lock lockee
-     :java-type Void/TYPE
-     :position pos}))
+(def
+  ^{:doc "If true, the compiler will open each compiled class
+         file into a tree inspector"}
+  *debug-inspect* false)
 
-(defmethod analyze [::special 'monitor-exit]
-  [[_ lockee]]
-  (run
-    [pos (set-val :position :expression)
-     jt (set-val :want-unboxed nil)
-     lockee (analyze lockee)
-     _ (set-val :position pos)]
-    {::etype ::monitor-exit
-     :lock lockee
-     :java-type Void/TYPE
-     :position pos}))
+(defn tea "Test analysis"
+  ([form] (tea form :expression nil))
+  ([form pos typ] (tea form pos typ (DynamicClassLoader.)))
+  ([form pos typ loader]
+   (let [[res ctx]
+         (run-with (assoc null-context :loader loader)
+           [_ (push-object-frame {:name 'toplevel})
+            a (analyze pos typ nil form)
+            _ pop-frame]
+           a)]
+     res)))
 
-(defmethod gen ::monitor-enter
-  [{:keys [lock position]}]
-  `(~@(gen lock)
-    [:monitorenter]
-    [:aconst-null]
-    ~@(maybe-pop position)))
+(defn teg "Test gen"
+  ([form] (gen (tea form)))
+  ([form pos] (gen (tea form pos nil)))
+  ([form pos typ] (gen (tea form pos typ))))
 
-(defmethod gen ::monitor-exit
-  [{:keys [lock position]}]
-  `(~@(gen lock)
-    [:monitorexit]
-    [:aconst-null]
-    ~@(maybe-pop position)))
+(defn tee 
+  "Test eval-toplevel"
+  [form]
+  (let [ldr (DynamicClassLoader.)]
+    (eval-toplevel (tea form :eval nil ldr) ldr)))
 
-;;;; Assignment
-
-(defmethod analyze [::special 'def]
-  [[_ target init :as form]]
-  (cond
-    (> (count form) 3)
-    (throw (Exception. "Too many arguments to def"))
-    (< (count form) 2)
-    (throw (Exception. "Too few arguments to def"))
-    (not (symbol? target))
-    (throw (Exception. "First argument to def must be a Symbol"))
-    :else
-    (let [^Var v (lookup-var *ns* target true)]
-      (if (nil? v)
-        (throw (Exception. "Can't refer to qualified var that doesn't exist"))
-        (let [v (cond
-                  (= (.ns v) *ns*) v
-                  (nil? (namespace target)) (intern *ns* target)
-                  :else (throw (Exception.
-                                 "Can't create defs outside of current ns")))
-              mm (meta target)]
-          (when (:static mm)
-            ;; Not the right place to do this...
-            (alter-meta! v assoc
-                         :static true
-                         :arglists (second (:arglists mm))))
-          (run [pos (update-val :position #(if (= % :eval) % :expression))
-                meta-expr (analyze mm)
-                n (set-val :name (name target))
-                init-expr (analyze init)
-                _ (set-val :name n)
-;                v (analyze target) ;`(~'var ~target))
-                _ (set-val :position pos)]
-            {::etype ::def
-             :metamap meta-expr
-             :target v
-             :java-type Var
-             :init init-expr
-             :position pos
-             :init-provided? (== (count form) 3)}))))))
-
-(defmethod gen ::def
-  [{:keys [metamap target init init-provided? position]}]
-  #_(println "Def target=" target "init:" init-provided?
-           "meta=" metamap)
-  `(~@(gen-constant target)
-    ;[:checkcast ~Var]
-    ;~@(when metamap
-    ;    `([:dup]
-    ;      ~@(gen metamap)
-    ;      [:checkcast ~IPersistentMap]
-    ;      [:invokevirtual ~[Var 'setMeta [:method :void [IPersistentMap]]]]))
-    ~@(when init-provided?
-        `([:dup]
-          ~@(gen init)
-          [:invokevirtual ~[Var 'bindRoot [:method :void [Object]]]]))
-    ~@(maybe-pop position)))
-
-(defmethod eval-toplevel ::def
-  [{:keys [metamap target init init-provided?]} loader]
-  (let [the-var target]
-    (if init-provided?
-      (.bindRoot the-var (eval-toplevel init loader))
-      (if metamap
-        (reset-meta! the-var (eval-toplevel metamap loader))))
-    the-var))
-
-(defmethod analyze [::special 'set!]
+#_(defmethod analyze [::special 'set!]
   [[_ target value :as form]]
   (if (not= (count form) 3)
     (throw (IllegalArgumentException.
@@ -307,11 +215,12 @@
 
 ;; XXX just a quick hack
 (defmethod analyze [::special 'case*]
-  [[_ expr shift mask low high default vmap id? :as form]]
-  (analyze (reduce (fn [part [k e]]
+  [pos typ _ [_ expr shift mask low high default vmap id? :as form]]
+  (let [reform (reduce (fn [part [k e]]
                      `(if (= ~expr '~k) ~e ~part))
                    default
-                   (vals vmap))))
+                   (vals vmap))]
+    (analyze pos typ nil reform)))
 
   #_(fn [ctx]
     (if (= (:position ctx) :eval)
@@ -407,7 +316,13 @@
       [:invokestatic
        ~[RT 'vector [:method IPersistentVector [[:array Object]]]]])
     :else
-    (println "Unknown constant" c)))
+    (let [cstr (binding [*print-dup* true]
+                 (RT/printString c))]
+      (println "serial.constant" cstr)
+      `([:ldc ~cstr]
+        [:invokestatic ~[RT 'readString [:method Object [String]]]]
+        [:checkcast ~(class c)]))))
+;    (println "Unknown constant" c)
 
 (defn emit-constants [obj cref mref]
   (doseq [{:keys [cfield source-type obj lit-val]} (:constants obj)]
@@ -436,7 +351,12 @@
                     :flags #{:public}
                     :throws [Exception]})]
       (asm/emit1 cref mref [:label loop-label])
-      (asm/emit cref mref (gen body))
+      (let [body (gen body)]
+        (try
+          (asm/emit cref mref body)
+          (catch Throwable e
+            (println "Bad body:" body)
+            (throw e))))
       (asm/emit1 cref mref [:areturn])
       (asm/assemble-method mref))))
 
@@ -444,7 +364,7 @@
   "Compile and load the class representing
   a fn or (not implemented yet) deftype"
   [loader obj super ifaces]
-  (println "clazz" (:name obj))
+  ;(println "clazz" (:name obj))
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces
@@ -624,7 +544,7 @@
   (run [form (macroexpand-impl *ns* form)
         res (if (and (seq? form) (= (first form) 'do))
               (m-map compile1 (next form))
-              (run [analyzed (analyze form)
+              (run [analyzed (analyze :eval nil nil form)
                     loader (fetch-val :loader)]
                 (let [bytecode (gen analyzed)]
                   (eval-toplevel analyzed loader)

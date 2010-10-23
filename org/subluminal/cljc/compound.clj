@@ -711,3 +711,76 @@
       (.newInstance ctor (box-args (.getParameterTypes ctor) argvals))
       (Reflector/invokeConstructor source-type
                                    (into-array Object argvals)))))
+
+;;;; Collection literals
+
+(defmethod analyze ::vector
+  [pos typ _ vect]
+  (run [comps (m-map (partial analyze :expression nil nil) vect)
+        res (if (every? #(isa? (::etype %) ::constant) comps)
+              (register-constant pos (vec (map :lit-val comps)))
+              (m-result {::etype ::vector
+                         :components comps
+                         :gen-type (if (= typ Void/TYPE)
+                                     typ
+                                     IPersistentVector)}))]
+    ;; TODO metadata
+    res))
+
+(defmethod analyze ::set
+  [pos typ _ elts]
+  (run [elts (m-map (partial analyze :expression nil nil) elts)
+        res (if (every? #(isa? (::etype %) ::constant) elts)
+              (register-constant (set (map :lit-val elts)))
+              (m-result {::etype ::set
+                         :elements elts
+                         :gen-type (if (= typ Void/TYPE)
+                                     typ
+                                     IPersistentSet)}))]
+    res))
+
+(defmethod analyze ::map
+  [pos typ _ entries]
+  (run [entries (m-map (partial analyze :expression nil nil)
+                       (apply concat (seq entries)))
+        res (if (every? #(isa? (::etype %) ::constant) entries)
+              (register-constant (apply array-map (map :lit-val entries)))
+              (m-result {::etype ::map
+                         :entries entries
+                         :gen-type (if (= typ Void/TYPE)
+                                     typ
+                                     IPersistentMap)}))]
+    res))
+
+(defmethod gen ::vector
+  [{:keys [components gen-type]}]
+  `(~@(gen-array components)
+    [:invokestatic
+     ~[RT 'vector [:method IPersistentVector [[:array Object]]]]]
+    ~@(gen-convert IPersistentVector gen-type)))
+
+(defmethod gen ::set
+  [{:keys [elements gen-type]}]
+  `(~@(gen-array elements)
+    [:invokestatic
+     ~[RT 'set [:method IPersistentSet [[:array Object]]]]]
+    ~@(gen-convert IPersistentSet gen-type)))
+
+(defmethod gen ::map
+  [{:keys [entries gen-type]}]
+  `(~@(gen-array entries)
+    [:invokestatic
+     ~[RT 'map [:method IPersistentMap [[:array Object]]]]]
+    ~@(gen-convert IPersistentMap gen-type)))
+
+(defmethod eval-toplevel ::vector
+  [{:keys [components]} loader]
+  (into [] (map #(eval-toplevel % loader) components)))
+
+(defmethod eval-toplevel ::set
+  [{:keys [elements]} loader]
+  (into #{} (map #(eval-toplevel % loader) elements)))
+
+(defmethod eval-toplevel ::map
+  [{:keys [entries]} loader]
+  (apply array-map (map #(eval-toplevel % loader) entries)))

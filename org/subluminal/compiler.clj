@@ -182,104 +182,6 @@
                   [:aastore]))
               objects (range (count objects)))))
 
-(defn tea "Test analysis"
-  ([form] (tea form :expression))
-  ([form pos] (tea form pos (DynamicClassLoader.)))
-  ([form pos loader]
-   (let [[res ctx]
-         (run-with (assoc null-context :loader loader)
-           [_ (push-object-frame {:name 'toplevel})
-            _ (set-val :position pos)
-            a (analyze form)
-            _ pop-frame]
-           a)]
-     res)))
-
-(defn teg "Test gen"
-  ([form] (gen (tea form)))
-  ([form pos] (gen (tea form pos))))
-
-(defn tee 
-  "Test eval-toplevel"
-  [form]
-  (let [ldr (DynamicClassLoader.)]
-    (eval-toplevel (tea form :eval ldr) ldr)))
-
-;;;; Nonempty collections
-
-(defmethod analyze ::vector
-  [vect]
-  (run [pos (set-val :position :expression)
-        comps (m-map analyze vect)
-        _ (set-val :position pos)
-        res (if (every? #(isa? (::etype %) ::constant) comps)
-              (register-constant (vec (map :orig comps)))
-              (m-result {::etype ::vector
-                         :components comps
-                         :java-class IPersistentVector
-                         :position pos}))]
-    ;; TODO metadata
-    res))
-
-(defmethod analyze ::set
-  [elts]
-  (run [pos (set-val :position :expression)
-        elts (m-map analyze elts)
-        _ (set-val :position pos)
-        res (if (every? #(isa? (::etype %) ::constant) elts)
-              (register-constant (set (map :orig elts)))
-              (m-result {::etype ::set
-                         :elements elts
-                         :java-class IPersistentSet
-                         :position pos}))]
-       res))
-
-(defmethod analyze ::map
-  [entries]
-  (run [pos (set-val :position :expression)
-        entries (m-map analyze (apply concat (seq entries)))
-        _ (set-val :position pos)
-        res (if (every? #(isa? (::etype %) ::constant) entries)
-              (register-constant (apply array-map (map :orig entries)))
-              (m-result {::etype ::map
-                         :entries entries
-                         :java-class IPersistentMap
-                         :position pos}))]
-       res))
-
-(defmethod gen ::vector
-  [{:keys [components position]}]
-  `(~@(gen-array components)
-    [:invokestatic
-     ~[RT 'vector [:method IPersistentVector [[:array Object]]]]]
-    ~@(maybe-pop position)))
-
-(defmethod gen ::set
-  [{:keys [elements position]}]
-  `(~@(gen-array elements)
-    [:invokestatic
-     ~[RT 'set [:method IPersistentSet [[:array Object]]]]]
-    ~@(maybe-pop position)))
-
-(defmethod gen ::map
-  [{:keys [entries position]}]
-  `(~@(gen-array entries)
-    [:invokestatic
-     ~[RT 'map [:method IPersistentMap [[:array Object]]]]]
-    ~@(maybe-pop position)))
-
-(defmethod eval-toplevel ::vector
-  [{:keys [components]} loader]
-  (into [] (map #(eval-toplevel % loader) components)))
-
-(defmethod eval-toplevel ::set
-  [{:keys [elements]} loader]
-  (into #{} (map #(eval-toplevel % loader) elements)))
-
-(defmethod eval-toplevel ::map
-  [{:keys [entries]} loader]
-  (apply hash-map (map #(eval-toplevel % loader) entries)))
-
 ;;;; synchronization
 
 (defmethod analyze [::special 'monitor-enter]
@@ -508,12 +410,10 @@
     (println "Unknown constant" c)))
 
 (defn emit-constants [obj cref mref]
-  (doseq [{:keys [cfield gen-type obj lit-val]} (:constants obj)]
-;    (println "Const type=" java-type "orig=" orig)
+  (doseq [{:keys [cfield source-type obj lit-val]} (:constants obj)]
     (asm/emit cref mref
       `(~@(gen-constant lit-val)
-        ;~@(if java-type [[:checkcast java-type]])
-        [:putstatic [~obj ~cfield ~(class lit-val)]]))))
+        [:putstatic [~obj ~cfield ~source-type]]))))
 
 ;; TODO: defmulti --> deftypes also
 (defn emit-methods [{:keys [variadic-arity] :as obj} cref]
@@ -551,9 +451,9 @@
                       :flags #{:public :super :final}}]
     ;; static fields for constants
     (doseq [fld (:constants obj)]
-      (let [{:keys [cfield lit-val]} fld]
+      (let [{:keys [cfield source-type]} fld]
         (asm/add-field c {:name cfield
-                          :descriptor (class lit-val)
+                          :descriptor source-type
                           :flags #{:public :final :static}})))
 
     ;; static init for constants, keywords and vars

@@ -29,15 +29,26 @@
 ;;;; that don't fall into one of the more specific types
 ;;;; Cannot be of primitive type
 
+(defn- const-source-type [c]
+  (cond
+    (vector? c) IPersistentVector
+    (set? c) IPersistentSet
+    (map? c) IPersistentMap
+    (seq? c) ISeq
+    (number? c) Number
+    :else (class c)))
+
 (defn register-constant
   [pos obj]
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))
-          gen-type (if (= pos :statement) Void/TYPE (class obj))]
+          typ (const-source-type obj)
+          gen-type (if (= pos :statement) Void/TYPE typ)]
       (if-let [c (get (:constant-ids curr-obj) obj)]
         [(assoc c :gen-type gen-type) ctx]
-        (let [c {::etype ::constant
-                 :gen-type (class obj)
+        (let [typ (const-source-type obj)
+              c {::etype ::constant                 
+                 :source-type typ
                  :cfield (gensym "const__")
                  :lit-val obj
                  :obj (:name curr-obj)}
@@ -51,13 +62,12 @@
   (register-constant pos obj))
 
 (defmethod gen ::constant
-  [{:keys [gen-type lit-val obj cfield]}]
-  {:pre [(or (= gen-type Void/TYPE) (= gen-type (class lit-val)))]}
-  (println "fetch-const" [:getstatic ~[obj cfield (class lit-val)]])
+  [{:keys [gen-type source-type obj cfield]}]
+;  {:pre [(or (= gen-type Void/TYPE) (= gen-type source-type))]}
   (if (= gen-type Void/TYPE)
     ()
-    `([:getstatic ~[obj cfield (class lit-val)]]
-      ~@(gen-convert (class lit-val) gen-type))))
+    `([:getstatic ~[obj cfield source-type]]
+      ~@(gen-convert source-type gen-type))))
 
 (defmethod eval-toplevel ::constant
   [{:keys [lit-val]} loader]

@@ -129,7 +129,6 @@
             :label (or lbl (gensym "LB__"))
             :force-live (when lbl true) ; don't clear 'this'
             :kind kind
-            :method-tag (:method ctx)
             :fn-tag (:fn ctx)
             :gen-type gtype
             :source-type stype
@@ -405,16 +404,23 @@
 
 (defmethod analyze ::invocation
   [pos typ name [op & args :as form]]
-  (run [me (macroexpand-impl *ns* form)
-        res (if-not (identical? me form)
-              (analyze pos typ name me)
-              (run [op (analyze :expression nil nil op)
-                    args (m-map (partial analyze :expression true nil) args)]
-                {::etype ::invocation
-                 :op op
-                 :args (doall args)
-                 :gen-type (if (= pos :statement) Void/TYPE Object)}))]
-    res))
+  (let [tag (tag-class *ns* (tag-of form))]
+    (run [me (macroexpand-impl *ns* form)
+          res (if-not (identical? me form)
+                (analyze pos typ name me)
+                (run [op (analyze :expression nil nil op)
+                      args (m-map (partial analyze :expression true nil) args)]
+                  {::etype ::invocation
+                   :op op
+                   :args (doall args)
+                   :gen-type (cond
+                               (= pos :statement)
+                               Void/TYPE
+                               (and (analyze-contract typ tag)
+                                    (gen-contract Object tag))
+                               tag
+                               :else Object)}))]
+      res)))
 
 (defmethod gen ::invocation
   [{:keys [op args gen-type]}]
@@ -424,7 +430,7 @@
       ~@(mapcat (fn [arg]
                   `(~@(gen arg)
                     ~@(gen-convert (:gen-type arg) Object)))
-                args)
+                posargs)
       ~@(when (seq varargs) (gen-array varargs))
       [:invokeinterface
        ~[IFn 'invoke [:method Object (if (seq varargs)
@@ -438,3 +444,96 @@
   (let [eop (eval-toplevel op loader)
         eargs (doall (map #(eval-toplevel % loader) args))]
     (apply eop eargs)))
+
+;;;; Host expressions
+
+(defn member-type
+  "Determine the type of a member expression
+  when a :tag hint and a request for a primitive
+  type may be given"
+  [source req hint]
+  (cond
+    (= req Void/TYPE) req
+    (and hint (analyze-contract req hint)
+         (gen-contract source hint))
+    hint
+    (analyze-contract req source)
+    source
+    (gen-contract source req)
+    req
+    :else (boxed-version source source)))
+
+(defn analyze-field [form ^Class c inst member type-req]
+  {:post [(analyze-contract type-req (:gen-type %))]}
+  (let [sym (if (symbol? member)
+              member
+              (symbol (name member)))
+        tag (tag-class *ns* (tag-of form))]
+    (if c
+      (let [^Field fld (.getField c (munge-impl (name sym)))
+            source-type (.getType fld)
+            gen-type (member-type source-type type-req tag)]
+        {::etype ::static-field
+         :target-class c
+         :member fld
+         :gen-type gen-type
+         :source-type source-type})
+      (let [^Class c (if (:gen-type inst)
+                       (:gen-type inst)
+                       Object)
+            ^Field fld (Reflector/getField
+                         c (munge-impl (name sym)) false)
+            source-type (if fld (.getType fld) Object)
+            gen-type (member-type source-type type-req tag)]
+        {::etype ::instance-field
+         :target-class c
+         :target inst
+         :member fld
+         :member-name (munge-impl (name sym))
+         :gen-type gen-type
+         :source-type source-type}))))
+
+(defmethod analyze [::special '.]
+  [pos typ _ [_ target member & args :as form]]
+  (if (< (count form) 3)
+    (throw (IllegalArgumentException.
+             "Malformed member expression, expecting (. target member ...)"))
+    (let [memb (if (seq? member) (first member) member)
+          argl (if (seq? member) (next member) args)
+          ^Class c (maybe-class *ns* target false)
+          field? (and (= (count form) 3)
+                         (or (symbol? member) (keyword? member)))]
+      (when (or (not (symbol? memb))
+                (and (seq? member) (seq args)))
+        (throw (Exception. "Malformed member expression")))
+      (run [inst (if c (m-result nil) (analyze :expression nil nil target))
+            argl (m-map (partial :expression true nil) argl)]
+        (let [field? (when (and field? (not (keyword? memb)))
+                       (if c
+                         (empty? (Reflector/getMethods
+                                   c 0 (munge-impl (name memb)) true))
+                         (empty? (Reflector/getMethods
+                                   (or (:gen-type inst) Object) 0
+                                   (munge-impl (name memb)) false))))
+              typ (if (= pos :statement) Void/TYPE typ)]
+          (if field?
+            (analyze-field form c inst memb typ)
+            (analyze-java-method form c inst memb argl typ)))))))
+
+(defmethod gen ::static-field
+  [{:keys [target source-type gen-type member]}]
+  `([:getstatic ~member]
+    ~@(gen-convert source-type gen-type)))
+
+(defmethod gen ::instance-field
+  [{:keys [target target-class member member-name source-type gen-type]}]
+  (if member
+    `(~@(gen target)
+      [:getfield ~member]
+      ~@(gen-convert source-type gen-type))
+    ;; Need reflection
+    `(~@(gen target)
+      [:ldc ~member-name]
+      [:invokestatic ~[Reflector 'invokeNoArgInstanceMember
+                       [:method Object [Object String]]]]
+      ~@(gen-convert source-type gen-type))))

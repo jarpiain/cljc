@@ -55,7 +55,8 @@
   {:pre [(or (= gen-type Void/TYPE) (= gen-type (class lit-val)))]}
   (if (= gen-type Void/TYPE)
     ()
-    `([:getstatic ~[obj cfield (class lit-val)]])))
+    `([:getstatic ~[obj cfield (class lit-val)]]
+      ~@(gen-convert (class lit-val) gen-type))))
 
 (defmethod eval-toplevel ::constant
   [{:keys [lit-val]} loader]
@@ -451,7 +452,7 @@
   (let [v (lookup-var *ns* vname false)]
     (if v
       (run [cv (register-var pos v)]
-        (assoc cv ::etype ::the-var))
+        (assoc cv ::etype ::the-var :gen-type Var))
       (throw (Exception. (str "Unable to resolve var: " vname
                               " in this context"))))))
 

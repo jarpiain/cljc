@@ -179,9 +179,8 @@
      (fn [ctx]
        (let [b {:symbol sym
                 :label (or lbl (gensym "BB"))
-                :force-live (when lbl true) ; don't clear 'this'
+                :force-live (when lbl true) ; don't clear 'this
                 :kind kind
-                :method-tag (:method ctx)
                 :fn-tag (:fn ctx)
                 :java-type jtype
                 :clear-root (:clear-root ctx)}]
@@ -192,7 +191,6 @@
 (defn make-this-binding
   [sym jtype]
   (make-binding sym jtype :fnarg 'this))
-
 
 (defn syncat
   "The syntax category of a form. Dispatch function for analyze."
@@ -575,67 +573,6 @@
          :java-type target-type
          :unbox-type source-type
          :tag tag}))))
-
-(defn analyze-field [form ^Class c inst member unboxed?]
-  (let [sym (if (symbol? member)
-              member
-              (symbol (name member)))
-        tag (tag-of form)]
-    (if c
-      (let [^Field fld (.getField c (munge-impl (name sym)))
-            typ (.getType fld)
-            source-type (if tag (tag-class *ns* tag) typ)
-            target-type (if (and (.isPrimitive source-type)
-                                 (not (true? unboxed?))
-                                 (not= source-type unboxed?))
-                          Object
-                          source-type)]
-        {::etype ::static-field         
-         :target c
-         :member fld
-         :java-type target-type
-         :unbox-type source-type
-         :tag tag})
-      (let [^Class c (when (and inst (:java-type inst)
-                                (not (.isPrimitive (:java-type inst))))
-                       (:java-type inst))
-            ^Field fld (when c (Reflector/getField
-                                 c (munge-impl (name sym)) false))
-            typ (if fld (.getType fld) Object)
-            source-type (if tag (tag-class *ns* tag) typ)
-            target-type (if (and (.isPrimitive source-type)
-                                 (not (true? unboxed?))
-                                 (not= source-type unboxed?))
-                          Object
-                          source-type)]
-      {::etype ::instance-field
-       :target-class c
-       :target inst
-       :field fld
-       :member (munge-impl (name sym))
-       :java-type target-type
-       :unbox-type source-type
-       :tag tag}))))
-
-(defmethod gen ::static-field
-  [{:keys [target member java-type unbox-type position]}]
-  `([:getstatic ~member]
-    ~@(gen-conversion java-type unbox-type)
-    ~@(maybe-pop position java-type)))
-
-(defmethod gen ::instance-field
-  [{:keys [target target-class member field java-type unbox-type position]}]
-  (if field
-    `(~@(gen target)
-      ~@(if target-class [[:checkcast target-class]])
-      [:getfield ~field]
-      ~@(gen-conversion java-type unbox-type)
-      ~@(maybe-pop position java-type))
-    `(~@(gen target)
-      [:ldc ~member]
-      [:invokestatic ~[Reflector 'invokeNoArgInstanceMember
-                       [:method Object [Object String]]]]
-      ~@(maybe-pop position))))
 
 ;; TODO: fix boxing
 (defmethod gen ::static-method
@@ -1243,6 +1180,8 @@
           _ (set-val :position :eval)
           context (set-state null-context)]
          (loop [ctx context loader-code [] forms (form-seq rd)]
+           ;; Make sure to eval the form before reading the next one
+           ;; since rebinding *ns* affects the reading of :: and `
            (if (seq forms)
              (let [form (first forms)
                    [code ctx] ((compile1 form) ctx)]

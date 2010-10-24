@@ -184,9 +184,9 @@
          file into a tree inspector"}
   *debug-inspect* false)
 
-(defn tea "Test analysis"
-  ([form] (tea form :expression nil))
-  ([form pos typ] (tea form pos typ (DynamicClassLoader.)))
+(defn analyze-fragment "Test analysis"
+  ([form] (analyze-fragment form :expression nil))
+  ([form pos typ] (analyze-fragment form pos typ (DynamicClassLoader.)))
   ([form pos typ loader]
    (let [[res ctx]
          (run-with (assoc null-context :loader loader)
@@ -196,16 +196,15 @@
            a)]
      res)))
 
-(defn teg "Test gen"
-  ([form] (gen (tea form)))
-  ([form pos] (gen (tea form pos nil)))
-  ([form pos typ] (gen (tea form pos typ))))
+(defn gen-fragment "Test gen"
+  ([form] (gen (analyze-fragment form)))
+  ([form pos] (gen (analyze-fragment form pos nil)))
+  ([form pos typ] (gen (analyze-fragment form pos typ))))
 
-(defn tee 
-  "Test eval-toplevel"
+(defn eval
   [form]
   (let [ldr (DynamicClassLoader.)]
-    (eval-toplevel (tea form :eval nil ldr) ldr)))
+    (eval-toplevel (analyze-fragment form :eval nil ldr) ldr)))
 
 #_(defmethod analyze [::special 'set!]
   [[_ target value :as form]]

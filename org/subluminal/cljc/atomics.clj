@@ -17,7 +17,7 @@
 
 (defn register-constant
   [req obj]
-  (if (nil? obj) (throw (Exception. "Null ::constant")))
+  #_(if (nil? obj) (throw (Exception. "Null ::constant")))
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))
           typ (const-source-type obj)
@@ -41,7 +41,6 @@
 
 (defmethod gen ::constant
   [{:keys [gen-type source-type obj cfield]}]
-;  {:pre [(or (= gen-type Void/TYPE) (= gen-type source-type))]}
   (if (= gen-type Void/TYPE)
     ()
     `([:getstatic ~[obj cfield source-type]]
@@ -55,7 +54,6 @@
 
 (defmethod analyze ::null
   [pos typ _ form]
-  ;(println "Nil literal:" pos typ)
   (run []
     {::etype ::null
      :gen-type (if (= typ Void/TYPE) typ nil)}))
@@ -98,7 +96,7 @@
       `([:iconst-1])
       `([:iconst-0]))
     :else
-    (if val
+    (if lit-val
       `([:getstatic ~[Boolean 'TRUE Boolean]])
       `([:getstatic ~[Boolean 'FALSE Boolean]]))))
 

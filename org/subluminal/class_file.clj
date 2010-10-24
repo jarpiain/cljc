@@ -1459,7 +1459,6 @@
     (assoc res :symtab syms)))
 
 (defn add-field [cref {:keys [name descriptor flags constant] :as fld}]
-  ;(println "add-field" name descriptor)
   (dosync
     (let [[[namei desci] tab]
           ((domonad state-m
@@ -1498,7 +1497,6 @@
 
 ;; XXX assembler assumes the Code attribute is at index 0
 (defn add-method [cref {:keys [name descriptor flags params throws] :as meth}]
-  ;(println "add-method" name descriptor flags params throws)
   (dosync
     (let [[_ _ args :as desc] (normalize-method-descriptor descriptor)
           bindings (interleave (concat params (repeatedly gensym)) args)
@@ -1912,7 +1910,6 @@
   "Add one instruction to the code buffer converting symbolic
   constants to constant pool indices"
   [cref mref instr ctx]
-  ;(println "emit instr" instr)
   (dosync
     (let [code (get-in @mref [:attributes 0])
           pool (:symtab @cref)

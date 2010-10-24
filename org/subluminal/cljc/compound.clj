@@ -198,10 +198,8 @@
 
 (defn analyze-loop
   [pos typ [_ bindings & body :as form] loop?]
-  ;(println "Loop" pos typ)
   (cond
-    (or (= pos :eval))
-;        (and loop? (= pos :expression))
+    (= pos :eval)
     (analyze pos typ nil `((~'fn* [] ~form)))
 
     (not (vector? bindings))
@@ -480,7 +478,6 @@
   type may be given"
   [source req hint]
   {:post [(or % (= source Void/TYPE))]}
-  ;(println "member-type source" source "req" req "hint" hint)
   (cond
     (= req Void/TYPE) req
     (and hint (analyze-contract req hint)
@@ -624,32 +621,25 @@
 
 (defmethod gen ::static-method
   [{:keys [target-class member member-name gen-type source-type args]}]
-  ;(println (class member-name) member-name "gen-static" target-class)
   (if member
-    (do #_(println "Resolved call" member (seq (.getParameterTypes member))
-                 "with args" (map :gen-type args))
     `(~@(mapcat (fn [typ arg]
                   `(~@(gen arg)
                     ~@(gen-coerce (:gen-type arg) typ)))
                 (seq (.getParameterTypes member))
                 args)
       [:invokestatic ~member]
-      ~@(gen-convert source-type gen-type)))
+      ~@(gen-convert source-type gen-type))
     ;; Need reflection
-    (do #_(println "Unresolved call" target-class member-name
-                 (map :gen-type args))
     `([:ldc ~(.getName target-class)]
       [:invokestatic ~[Class 'forName [:method Class [String]]]]
       [:ldc ~member-name]
       ~@(gen-array args)
       [:invokestatic ~[Reflector 'invokeStaticMethod
                        [:method Object [Class String [:array Object]]]]]
-      ~@(gen-convert Object gen-type)))))
+      ~@(gen-convert Object gen-type))))
 
 (defmethod gen ::instance-method
-  [{:keys [target member member-name gen-type source-type args]}]
-  ;(println (class member-name) member-name
-  ;         "method-call" source-type "-->" gen-type)
+  [{:keys [target ^Method member member-name gen-type source-type args]}]
   (if member
     `(~@(gen target)
       ~@(mapcat (fn [typ arg]

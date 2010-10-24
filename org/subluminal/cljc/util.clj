@@ -276,7 +276,6 @@
 
 (defn subsumes [^"[Ljava.lang.Class;" left
                 ^"[Ljava.lang.Class;" right]
-  (println "subsumes?" (seq left) (seq right))
   (areduce left i ret false
            (let [^Class l (aget left i) ^Class r (aget right i)]
              (cond

@@ -43,7 +43,6 @@
   The name argument is used to name the class generated from
   a fn* form."
   (fn [position type-req name form]
-    ;(println "Analyzing" form "in pos" position "with type" type-req)
     (syncat form))
   :default ::invocation)
 
@@ -318,11 +317,9 @@
     :else
     (let [cstr (binding [*print-dup* true]
                  (RT/printString c))]
-      (println "serial.constant" cstr)
       `([:ldc ~cstr]
         [:invokestatic ~[RT 'readString [:method Object [String]]]]
         [:checkcast ~(class c)]))))
-;    (println "Unknown constant" c)
 
 (defn emit-constants [obj cref mref]
   (doseq [{:keys [cfield source-type obj lit-val]} (:constants obj)]
@@ -360,7 +357,6 @@
   "Compile and load the class representing
   a fn or (not implemented yet) deftype"
   [loader obj super ifaces]
-  ;(println "clazz" (:name obj))
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces

@@ -17,7 +17,7 @@ Does not depend on ASM (see below). Retargetting to ASM
 if desired shouldn't be too hard.
 
 This addresses some of the issues mentioned in
-<http://dev.clojure.org/display/design/Compiler+in+Clojure>
+http://dev.clojure.org/display/design/Compiler+in+Clojure
 
 Example:
 
@@ -89,7 +89,7 @@ Iteration is supported with the :times option. if, cond, and case can
 be used in defbinary bodies to provide conditional parsing and writing.
 The class-file library demonstrates most of the options (compare the
 ClassFile definition in class_file.clj with the JVM specification at
-<http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html>).
+http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html ).
 
 Reader and writer fns can be provided directly with defprimitive:
 

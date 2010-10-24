@@ -17,13 +17,14 @@
 
 (defn register-constant
   [req obj]
+  (if (nil? obj) (throw (Exception. "Null ::constant")))
   (fn [ctx]
     (let [curr-obj (get (:index ctx) (:fn ctx))
           typ (const-source-type obj)
           gen-type (if (= req Void/TYPE) req typ)]
       (if-let [c (get (:constant-ids curr-obj) obj)]
         [(assoc c :gen-type gen-type) ctx]
-        (let [typ (const-source-type obj)
+        (let [typ (or (const-source-type obj) Object)
               c {::etype ::constant                 
                  :source-type typ
                  :cfield (gensym "const__")
@@ -399,7 +400,7 @@
                     :else gen)]
           (assoc bind :gen-type gen))))))
 
-(derive ::var ::constant)
+;(derive ::var ::constant)
 
 (defmethod eval-toplevel ::var
   [{:keys [lit-val]} loader]
@@ -471,7 +472,9 @@
 
 (defmethod analyze [::special 'quote]
   [pos typ _ [_ obj]]
-  (register-constant typ obj))
+  (if (nil? obj)
+    (analyze pos typ _ nil) ; XXX
+    (register-constant typ obj)))
 
 ;;;; Empty collections
 

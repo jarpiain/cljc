@@ -9,9 +9,10 @@
   (cond
     (isa? l r) r
     (isa? r l) l
-    :else (common-superclass
-            (.getSuperclass l)
-            (.getSuperclass r))))
+    ;; Interfaces report nil superclass
+    :else (recur
+            (or (.getSuperclass l) Object)
+            (or (.getSuperclass r) Object))))
 
 (defn common-supertype [^Class l ^Class r]
   (cond
@@ -543,7 +544,7 @@
          :target-class c
          :args args
          :member the-method
-         :member-name member
+         :member-name (munge-impl (name sym))
          :source-type source-type
          :gen-type gen-type})
       (let [c (or (:gen-type inst) Object)
@@ -623,26 +624,32 @@
 
 (defmethod gen ::static-method
   [{:keys [target-class member member-name gen-type source-type args]}]
+  ;(println (class member-name) member-name "gen-static" target-class)
   (if member
+    (do #_(println "Resolved call" member (seq (.getParameterTypes member))
+                 "with args" (map :gen-type args))
     `(~@(mapcat (fn [typ arg]
                   `(~@(gen arg)
                     ~@(gen-coerce (:gen-type arg) typ)))
                 (seq (.getParameterTypes member))
                 args)
       [:invokestatic ~member]
-      ~@(gen-convert source-type gen-type))
+      ~@(gen-convert source-type gen-type)))
     ;; Need reflection
+    (do #_(println "Unresolved call" target-class member-name
+                 (map :gen-type args))
     `([:ldc ~(.getName target-class)]
       [:invokestatic ~[Class 'forName [:method Class [String]]]]
       [:ldc ~member-name]
       ~@(gen-array args)
       [:invokestatic ~[Reflector 'invokeStaticMethod
                        [:method Object [Class String [:array Object]]]]]
-      ~@(gen-convert Object gen-type))))
+      ~@(gen-convert Object gen-type)))))
 
 (defmethod gen ::instance-method
   [{:keys [target member member-name gen-type source-type args]}]
-  ;(println member-name "method-call" source-type "-->" gen-type)
+  ;(println (class member-name) member-name
+  ;         "method-call" source-type "-->" gen-type)
   (if member
     `(~@(gen target)
       ~@(mapcat (fn [typ arg]
@@ -650,7 +657,9 @@
                     ~@(gen-coerce (:gen-type arg) typ)))
                 (seq (.getParameterTypes member))
                 args)
-      [:invokevirtual ~member]
+      ~(if (.isInterface (.getDeclaringClass member))
+         [:invokeinterface member]
+         [:invokevirtual member])
       ~@(gen-convert source-type gen-type))
     ;; Need reflection
     `(~@(gen target)

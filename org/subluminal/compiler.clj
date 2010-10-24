@@ -1,5 +1,5 @@
 (ns org.subluminal.compiler
-  (:refer-clojure :exclude [load compile eval])
+  (:refer-clojure :exclude [load load-file compile eval])
   (:import (java.io Reader InputStreamReader)
            (java.nio ByteBuffer)
            (java.nio.charset Charset)
@@ -352,11 +352,7 @@
                     :throws [Exception]})]
       (asm/emit1 cref mref [:label loop-label])
       (let [body (gen body)]
-        (try
-          (asm/emit cref mref body)
-          (catch Throwable e
-            (println "Bad body:" body)
-            (throw e))))
+        (asm/emit cref mref body))
       (asm/emit1 cref mref [:areturn])
       (asm/assemble-method mref))))
 
@@ -386,14 +382,14 @@
 
     ;; instance fields for closed-overs
     (doseq [[sym bind] (:closed-lexicals obj)]
-      (let [{:keys [gen-type]} bind]
+      (let [{:keys [source-type]} bind]
         (asm/add-field c {:name sym
-                          :descriptor gen-type
+                          :descriptor source-type
                           :flags #{:public :final}})))
 
     (let [clos (:closed-lexicals obj)
           clos-names (keys clos)
-          clos-types (map :gen-type (vals clos))]
+          clos-types (map :source-type (vals clos))]
       ;; ctor that takes closed-overs and inits base + fields
       ;; TODO: ctors that take metadata, deftype ctors
       (let [init (asm/add-method c {:name '<init>
@@ -570,3 +566,13 @@
         (compile-file inrd cljfile
           (.substring cljfile (inc (.lastIndexOf cljfile "/")))))))
   nil)
+
+(defn load-file
+  "A simple version to demonstrate bootstrapping"
+  [filename]
+  (let [loader (RT/baseLoader)]
+    (with-open [ins (.getResourceAsStream loader filename)
+                inrd (InputStreamReader. ins (Charset/forName "UTF-8"))]
+      (binding [*ns* *ns*]
+        (compile-file inrd filename
+          (.substring filename (inc (.lastIndexOf filename "/"))))))))

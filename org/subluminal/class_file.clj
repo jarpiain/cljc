@@ -1459,6 +1459,7 @@
     (assoc res :symtab syms)))
 
 (defn add-field [cref {:keys [name descriptor flags constant] :as fld}]
+  ;(println "add-field" name descriptor)
   (dosync
     (let [[[namei desci] tab]
           ((domonad state-m

@@ -140,7 +140,7 @@
     [:invokestatic [RT 'booleanCast [:method :boolean [Object]]]]))
 
 (defn maybe-cast [^Class from ^Class to]
-  {:pre [(ref-type? from) (ref-type? to)]}
+  {:pre [(ref-type? from) to (ref-type? to)]}
   (cond
     (nil? from) ()
     (isa? from to) ()

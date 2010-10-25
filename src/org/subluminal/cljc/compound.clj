@@ -908,8 +908,8 @@
 (defmethod eval-toplevel ::def
   [{:keys [metamap target init init-provided?]} loader]
   (let [the-var target]
-    (if init-provided?
-      (.bindRoot the-var (eval-toplevel init loader))
-      (if metamap
-        (reset-meta! the-var (eval-toplevel metamap loader))))
+    (when init-provided?
+      (.bindRoot the-var (eval-toplevel init loader)))
+    (when metamap
+      (reset-meta! the-var (eval-toplevel metamap loader)))
     the-var))

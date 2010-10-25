@@ -52,8 +52,8 @@ and the binfmt and class-file libs. (Comparing the second
 and third stages is non-trivial. Gensyms are used for class
 and field names so the generated classes will not be bit-for-bit
 equal). Remember to make a copy of the code in another namespace
-and use cljc/load-file instead of :use or :require. I haven't yet
-tried compiling any part of core.clj.
+and use cljc/load-file instead of :use or :require.
+Compiles clojure/core.clj 1.2 until reify* is needed.
 
 org.subluminal.binfmt
 =====================

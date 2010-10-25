@@ -104,6 +104,7 @@
   {Byte/TYPE Byte
    Short/TYPE Short
    Boolean/TYPE Boolean
+   Character/TYPE Character
    Integer/TYPE Integer
    Long/TYPE Long
    Float/TYPE Float

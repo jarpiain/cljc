@@ -188,7 +188,7 @@
 
 (defmethod analyze [::special 'fn*]
   [pos typ name [op & opts :as form]]
-  (run [classloader (fetch-val :loader)
+  (run [ctx (fetch-state)
         [op & meth :as norm] (normalize-fn* pos name form)
         _ (push-object-frame (meta norm))
         meth (m-reduce update-method-array
@@ -210,7 +210,7 @@
       (let [obj (assoc f :methods (filter identity meth)
                          :form form
                          :variadic-arity variadic-arity)]
-        (compile-class classloader obj (if variadic-info RestFn AFunction) [])
+        (compile-class ctx obj (if variadic-info RestFn AFunction) [])
         {::etype ::fn
          :class-name (:name obj)
          :gen-type (if (= typ Void/TYPE) typ IFn)

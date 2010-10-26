@@ -1442,28 +1442,27 @@
 
 (defn init-class [cls]
   (let [[res syms]
-        ((domonad state-m
-           [this-class (class-to-pool (normalize-type-specifier (:name cls)))
-            super-class (if-let [ext (:extends cls)]
-                          (class-to-pool (normalize-type-specifier ext))
-                          (m-result 0))
-            ifaces (m-seq (map (comp class-to-pool normalize-type-specifier)
-                               (:implements cls)))
-            [src atr]  (if-let [file (:source-file cls)]
-                         (m-seq [(utf-to-pool file)
-                                 (utf-to-pool "SourceFile")])
-                         (m-result nil))]
-           (assoc cls
-                  :attributes (if src
-                                (conj (:attributes cls)
-                                  {:name-index atr
-                                   :name "SourceFile"
-                                   :file-index src})
-                                (:attributes cls))
-                  :this-class this-class
-                  :super-class super-class
-                  :interfaces (vec ifaces)))
-          (:symtab cls))]
+        (run-with (:symtab cls)
+          [this-class (class-to-pool (normalize-type-specifier (:name cls)))
+           super-class (if-let [ext (:extends cls)]
+                         (class-to-pool (normalize-type-specifier ext))
+                         (m-result 0))
+           ifaces (m-seq (map (comp class-to-pool normalize-type-specifier)
+                              (:implements cls)))
+           [src atr]  (if-let [file (:source-file cls)]
+                        (m-seq [(utf-to-pool file)
+                                (utf-to-pool "SourceFile")])
+                        (m-result nil))]
+          (assoc cls
+                 :attributes (if src
+                               (conj (:attributes cls)
+                                 {:name-index atr
+                                  :name "SourceFile"
+                                  :file-index src})
+                               (:attributes cls))
+                 :this-class this-class
+                 :super-class super-class
+                 :interfaces (vec ifaces)))]
     (assoc res :symtab syms)))
 
 (defn add-field [cref {:keys [name descriptor flags constant] :as fld}]

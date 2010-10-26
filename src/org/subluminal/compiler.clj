@@ -366,10 +366,11 @@
 (defn compile-class
   "Compile and load the class representing
   a fn or (not implemented yet) deftype"
-  [loader obj super ifaces]
+  [ctx obj super ifaces]
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces
+                      :source-file (:source-file ctx)
                       :flags #{:public :super :final}}]
     ;; static fields for constants
     (doseq [fld (:constants obj)]
@@ -437,14 +438,13 @@
       (bin/write-binary ::asm/ClassFile bytecode c)
       (let [arr (.array bytecode)]
         (try
-          (.defineClass loader (str (:name obj)) arr nil)
+          (.defineClass (:loader ctx) (str (:name obj)) arr nil)
           (catch Throwable e
             (println "Caught while loading class:" (class e) e))
           (finally
             (when *debug-inspect*
               (.clear bytecode)
-              (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))))))
-    loader))
+              (inspect-tree (bin/read-binary ::asm/ClassFile bytecode)))))))))
 
 ;;;; toplevel
 
@@ -464,9 +464,11 @@
   ([rd src-path src-name]
    (asm/assembling [ns-init {:name (file->class-name src-path)
                              :flags #{:public :super}
-                             :source src-name}]
+                             :source-file src-name}]
      (let [loader (DynamicClassLoader.)]
-       (run-with (assoc null-context :loader loader)
+       (run-with (assoc null-context
+                        :loader loader
+                        :source-file src-name)
          [_ (push-object-frame {:name 'toplevel})
           _ (set-val :position :eval)
           context (set-state null-context)]

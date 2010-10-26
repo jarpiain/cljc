@@ -511,7 +511,8 @@
 
 (defn analyze-field [form ^Class c inst member type-req]
   {:post [(analyze-contract type-req (:gen-type %))]}
-  (let [sym (if (symbol? member)
+  (let [line (:line (meta form))
+        sym (if (symbol? member)
               member
               (symbol (name member)))
         tag (tag-class *ns* (tag-of form))]
@@ -520,6 +521,7 @@
             source-type (.getType fld)
             gen-type (member-type source-type type-req tag)]
         {::etype ::static-field
+         :line line
          :target-class c
          :member fld
          :gen-type gen-type
@@ -532,6 +534,7 @@
             source-type (if fld (.getType fld) Object)
             gen-type (member-type source-type type-req tag)]
         {::etype ::instance-field
+         :line line
          :target-class c
          :target inst
          :member fld
@@ -541,7 +544,8 @@
 
 (defn analyze-method-call
   [form ^Class c inst member args type-req]
-  (let [sym (if (symbol? member)
+  (let [line (:line (meta form))
+        sym (if (symbol? member)
               member
               (symbol (name member)))
         tag (tag-class *ns* (tag-of form))]
@@ -558,6 +562,7 @@
             source-type (if the-method (.getReturnType the-method) Object)
             gen-type (member-type source-type type-req tag)]
         {::etype ::static-method
+         :line line
          :target-class c
          :args args
          :member the-method
@@ -576,6 +581,7 @@
             source-type (if the-method (.getReturnType the-method) Object)
             gen-type (member-type source-type type-req tag)]
         {::etype ::instance-method
+         :line line
          :target inst
          :target-class c
          :args args
@@ -611,12 +617,12 @@
             (analyze-method-call form c inst memb argl typ)))))))
 
 (defmethod gen ::static-field
-  [{:keys [target source-type gen-type member]}]
+  [{:keys [target source-type gen-type member line]}]
   `([:getstatic ~member]
     ~@(gen-convert source-type gen-type)))
 
 (defmethod gen ::instance-field
-  [{:keys [target target-class member member-name source-type gen-type]}]
+  [{:keys [target target-class member member-name source-type gen-type line]}]
   (if member
     `(~@(gen target)
       [:getfield ~member]
@@ -640,9 +646,12 @@
       (Reflector/invokeNoArgInstanceMember inst member-name))))
 
 (defmethod gen ::static-method
-  [{:keys [target-class member member-name gen-type source-type args]}]
+  [{:keys [target-class member member-name gen-type source-type args line]}]
   (if member
-    `(~@(mapcat (fn [typ arg]
+    `(~@(when line
+          (let [lbl (gensym "Call__")]
+            (list [:label lbl] [:line line lbl])))
+      ~@(mapcat (fn [typ arg]
                   `(~@(gen arg)
                     ~@(gen-coerce (:gen-type arg) typ)))
                 (seq (.getParameterTypes member))
@@ -650,7 +659,10 @@
       [:invokestatic ~member]
       ~@(gen-convert source-type gen-type))
     ;; Need reflection
-    `([:ldc ~(.getName target-class)]
+    `(~@(when line
+          (let [lbl (gensym "Call__")]
+            (list [:label lbl] [:line line lbl])))
+      [:ldc ~(.getName target-class)]
       [:invokestatic ~[Class 'forName [:method Class [String]]]]
       [:ldc ~member-name]
       ~@(gen-array args)
@@ -659,9 +671,12 @@
       ~@(gen-convert Object gen-type))))
 
 (defmethod gen ::instance-method
-  [{:keys [target ^Method member member-name gen-type source-type args]}]
+  [{:keys [target ^Method member member-name gen-type source-type args line]}]
   (if member
-    `(~@(gen target)
+    `(~@(when line
+          (let [lbl (gensym "Call__")]
+            (list [:label lbl] [:line line lbl])))
+      ~@(gen target)
       ~@(mapcat (fn [typ arg]
                   `(~@(gen arg)
                     ~@(gen-coerce (:gen-type arg) typ)))
@@ -672,7 +687,10 @@
          [:invokevirtual member])
       ~@(gen-convert source-type gen-type))
     ;; Need reflection
-    `(~@(gen target)
+    `(~@(when line
+          (let [lbl (gensym "Call__")]
+            (list [:label lbl] [:line line lbl])))
+      ~@(gen target)
       [:ldc ~member-name]
       ~@(gen-array args)
       [:invokestatic ~[Reflector 'invokeInstanceMethod
@@ -705,7 +723,8 @@
   (if (< (count form) 2)
     (throw (Exception. (str "Wrong number of arguments, "
                             "expecting (new Classname args...)")))
-    (let [^Class c (maybe-class *ns* cls false)
+    (let [line (:line (meta form))
+          ^Class c (maybe-class *ns* cls false)
           tag (tag-class *ns* (tag-of form))]
       (if-not c
         (throw (IllegalArgumentException.
@@ -725,15 +744,19 @@
                   (matching-constructor (map :gen-type args) ctors))
                 gen-type (member-type c typ tag)]
             {::etype ::new
+             :line line
              :gen-type gen-type
              :source-type c
              :ctor match
              :args args}))))))
 
 (defmethod gen ::new
-  [{:keys [^Class source-type ^Class gen-type ^Constructor ctor args]}]
+  [{:keys [^Class source-type ^Class gen-type ^Constructor ctor args line]}]
   (if ctor
-    `([:new ~source-type]
+    `(~@(when line
+          (let [lbl (gensym "New__")]
+            (list [:label lbl] [:line line lbl])))
+      [:new ~source-type]
       [:dup]
       ~@(mapcat (fn [typ arg]
                   `(~@(gen arg)

@@ -244,7 +244,7 @@
                         target (if (maybe-class nss target false)
                                  (with-meta
                                    `(identity ~target)
-                                   {:tag Class})
+                                   {:tag 'java.lang.Class})
                                  target)]
                     (with-meta
                       `(~'. ~target ~member ~@(nnext form))

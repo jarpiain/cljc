@@ -41,11 +41,11 @@ a clojure tree inspector. (Warning! Will open a JFrame for each
 compiled class)
 
 Missing/broken features (partial list!)
-- Generates no debug info whatsoever
 - deftype*, reify*, letfn*, and set! are not implemented
 - case* is translated into a sequence of ifs resulting
   in O(n) lookup.
 - No optimization for keyword and var fn invocations
+- No metadata on fn objects
 
 Seems to work after a 3-stage bootstrap of itself
 and the binfmt and class-file libs. (Comparing the second

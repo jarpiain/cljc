@@ -287,7 +287,7 @@
   [memb]
   (+ 8 
      (* 6 (count (:attributes memb))) ; attr headers
-     (reduce + (map (fn [at] (attribute-length (:name at) at))
+     (reduce + (map (fn [at] (attribute-length at))
                       (:attributes memb)))))
 
 (defn class-length
@@ -299,7 +299,7 @@
      (pool-length (:pool (:symtab cls)))
      (reduce + (map member-length (:fields cls)))
      (reduce + (map member-length (:methods cls)))
-     (reduce + (map (fn [at] (attribute-length (:name at) at))
+     (reduce + (map (fn [at] (attribute-length at))
                     (:attributes cls)))))
 
 ;;;; Constant pool
@@ -430,18 +430,18 @@
 
 ;; Used to calculate the length field when writing
 ;; Add 6 to get the full length
-(defmulti attribute-length (fn [at inf] at))
+(defmulti attribute-length :name)
 (defmethod attribute-length :default
-  [at inf]
+  [inf]
   (println "Unknown attribute!")
   0)
 
 (defmethod attribute-length "ConstantValue"
-  [at inf]
+  [inf]
   2)
 
 (defmethod attribute-length "Code"
-  [at inf]
+  [inf]
   (+ 12
      (:code-length inf)
      (* 8 (count (:exception-table inf)))
@@ -450,25 +450,29 @@
                     (:attributes inf)))))
 
 (defmethod attribute-length "Exceptions"
-  [at inf]
+  [inf]
   (+ 2 (* 2 (count (:index-table inf)))))
 
 (defmethod attribute-length "SourceFile"
-  [at inf]
+  [inf]
   2)
 
 (defmethod attribute-length "Deprecated"
-  [at inf]
+  [inf]
   0)
 
 (defmethod attribute-length "Synthetic"
-  [at inf]
+  [inf]
   0)
+
+(defmethod attribute-length "LineNumberTable"
+  [inf]
+  (+ 2 (* 4 (count (:table inf)))))
 
 (bin/defbinary [attribute-info pool]
   [:name-index ::bin/uint16 {:constraint #(< 0 % (count pool))}]
   [:name ::null {:transient (pool-string pool name-index)}]
-  [:length ::bin/uint32 {:aux (attribute-length name attribute-info)}]
+  [:length ::bin/uint32 {:aux (attribute-length attribute-info)}]
   [:len2 ::null {:transient length}]
   (cond
     (= name "SourceFile")
@@ -1533,6 +1537,7 @@
                                   :asm []
                                   :ctx init-ctx
                                   :exception-table []
+                                  :line-numbers []
                                   :attributes []}))
 
       (when throws
@@ -2432,9 +2437,14 @@
                               :handler-pc (get-or-die labels handler-pc)
                               :catch-type catch-type})
                            xs))))
-        (alter mref assoc-in [:code :max-stack] stack)
-        (add-attribute cref mref
-                       (:code @mref))))))
+        (let [code (ref (assoc (:code @mref) :max-stack stack))]
+          (when-let [lns (seq (map (fn [{:keys [line start-pc]}]
+                                     {:line line
+                                      :start-pc (labels start-pc)})
+                                   (:line-numbers @code)))]
+            (add-attribute cref code {:name "LineNumberTable"
+                                      :table (vec lns)}))
+          (add-attribute cref mref @code))))))
 
 (defn assemble-class [cref]
   (dosync

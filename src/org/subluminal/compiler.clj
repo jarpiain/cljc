@@ -345,10 +345,10 @@
                   :descriptor [:method :int []]
                   :flags #{:public}})]
       (asm/emit cref mref
-        `([:ldc ~(int variadic-arity)]
+        `([:sipush ~(int variadic-arity)]
           [:ireturn]))
       (asm/assemble-method cref mref)))
-  (doseq [{:keys [argv bind this loop-label body] :as mm} (:methods obj)]
+  (doseq [{:keys [argv line bind this loop-label body] :as mm} (:methods obj)]
     (let [variadic? (variadic? argv)
           mref (asm/add-method cref
                    {:name (if variadic? 'doInvoke 'invoke)
@@ -358,6 +358,8 @@
                     :flags #{:public}
                     :throws [Exception]})]
       (asm/emit1 cref mref [:label loop-label])
+      (when line
+        (asm/emit1 cref mref [:line line loop-label]))
       (let [body (gen body)]
         (asm/emit cref mref body))
       (asm/emit1 cref mref [:areturn])

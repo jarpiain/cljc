@@ -61,7 +61,8 @@
                (next opts)
                opts)
         methods (if (vector? (first opts))
-                  (list opts)
+                  (list (with-meta opts
+                                   {:line (:line (meta form))}))
                   opts)]
     (run [enc current-object]
       (let [base-name (if enc
@@ -134,11 +135,12 @@
   (make-binding sym jtype jtype :fnarg 'this))
 
 (defn analyze-method
-  [[argv & body]]
+  [[argv & body :as form]]
   (if (not (vector? argv))
     (throw (IllegalArgumentException.
              "Malformed method, expected argument vector"))
-    (let [ret-class (or (tag-class *ns* (tag-of argv)) Object)
+    (let [line (:line (meta form))
+          ret-class (or (tag-class *ns* (tag-of argv)) Object)
           argv (process-fn*-args argv)]
       (when (.isPrimitive ret-class)
         (throw (IllegalArgumentException.
@@ -165,6 +167,7 @@
             m current-method
             _ pop-frame]
         (assoc m
+               :line line
                :body body
                :argv argv
                :bind bind

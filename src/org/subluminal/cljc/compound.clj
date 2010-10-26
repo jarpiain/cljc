@@ -441,13 +441,15 @@
 
 (defmethod analyze ::invocation
   [pos typ name [op & args :as form]]
-  (let [tag (tag-class *ns* (tag-of form))]
+  (let [tag (tag-class *ns* (tag-of form))
+        line (:line (meta form))]
     (run [me (macroexpand-impl *ns* form)
           res (if-not (identical? me form)
                 (analyze pos typ name me)
                 (run [op (analyze :expression nil nil op)
                       args (m-map (partial analyze :expression true nil) args)]
                   {::etype ::invocation
+                   :line line
                    :op op
                    :args (doall args)
                    :gen-type (cond
@@ -460,9 +462,12 @@
       res)))
 
 (defmethod gen ::invocation
-  [{:keys [op args gen-type]}]
+  [{:keys [op line args gen-type]}]
   (let [[posargs varargs] (split-at 20 args)]
-    `(~@(gen op)
+    `(~@(when line
+          (let [lbl (gensym "Call_")]
+            (list [:label lbl] [:line line lbl])))
+      ~@(gen op)
       ~@(gen-convert (:gen-type op) IFn)
       ~@(mapcat (fn [arg]
                   `(~@(gen arg)

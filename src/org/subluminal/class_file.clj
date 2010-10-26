@@ -1502,7 +1502,6 @@
                 (partition 2 bindings))]
     (assoc ctx :size size :vars vars)))
 
-;; XXX assembler assumes the Code attribute is at index 0
 (defn add-method [cref {:keys [name descriptor flags params throws] :as meth}]
   (dosync
     (let [[_ _ args :as desc] (normalize-method-descriptor descriptor)
@@ -1525,7 +1524,7 @@
 
       ;; Code attribute must come first
       (when-not (some #{:abstract :native} flags)
-        (add-attribute cref mref {:name "Code"
+        (alter mref assoc :code  {:name "Code"
                                   :labels {}
                                   :pc [0 0]
                                   :max-stack 0
@@ -1918,7 +1917,7 @@
   constants to constant pool indices"
   [cref mref instr ctx]
   (dosync
-    (let [code (get-in @mref [:attributes 0])
+    (let [code (get-in @mref [:code])
           pool (:symtab @cref)
           currpc (:pc code)
           {:keys [op args]} instr
@@ -1938,7 +1937,7 @@
                                _ (update-val :asm
                                    #(conj % ninstr))]
                               nextpc) code)]
-        (alter mref assoc-in [:attributes 0] ncode)
+        (alter mref assoc-in [:code] ncode)
         (alter cref assoc :symtab ntab)))))
 
 ; (label foo)
@@ -1952,7 +1951,7 @@
 
 (defn emit1
   "Add an instruction, block, or label into the instruction stream"
-  ([cref mref item] (emit1 cref mref (get-in @mref [:attributes 0 :ctx]) item))
+  ([cref mref item] (emit1 cref mref (get-in @mref [:code :ctx]) item))
   ([cref mref ctx item]
    {:pre [(and (sequential? item) (not (empty? item)))]}
    (cond
@@ -1961,7 +1960,7 @@
      (label? item)
      (let [[_ lbl] item]
         (dosync
-         (alter mref update-in [:attributes 0]
+         (alter mref update-in [:code]
                 (comp second
                   (domonad state-m
                     [_ (add-label lbl)
@@ -1984,7 +1983,7 @@
                     (normalize-type-specifier spec))
                   (:symtab @cref)))]
            (when spec (alter cref assoc :symtab tab))
-           (alter mref update-in [:attributes 0 :exception-table]
+           (alter mref update-in [:code :exception-table]
                   conj {:start-pc beg :end-pc end
                         :handler-pc handler
                         :catch-type idx}))))
@@ -1995,7 +1994,7 @@
          ;; Todo: generate LocalVarTable entries
          (when beg (emit1 cref mref [:label beg]))
          (let [subctx (merge-locals ctx vars)]
-           (alter mref update-in [:attributes 0 :max-locals]
+           (alter mref update-in [:code :max-locals]
                   (partial max (:size subctx)))
            (doseq [i items]
              (emit1 cref mref subctx i)))
@@ -2130,7 +2129,7 @@
   [meth]
   (dosync
     (alter meth
-           update-in [:attributes 0]
+           update-in [:code]
            (comp second
              (domonad state-m
                [_   (set-val :pc 0)
@@ -2410,21 +2409,21 @@
 ;[offs instr]
 ;;;; Top-level interface
 
-(defn get-or-die [map val]
-  (or (get map val) (throw (RuntimeException. (str "Undefined label " val)))))
+(defn- get-or-die [map val]
+  (or (get map val) (throw (Exception. (str "Undefined label " val)))))
 
-;; refine, compute block graph, generate stack map
-(defn assemble-method [mref]
+;; refine, compute block graph, TODO: generate stack map
+(defn assemble-method [cref mref]
   (dosync
     (when-not (some #{:abstract :native} (:flags @mref))
       (refine mref)
-      (let [code (get-in @mref [:attributes 0])
+      (let [code (:code @mref)
             labels (into {} (for [[k [v v]] (:labels code)] [k v]))
             extab (:exception-table code)
             blocks (basic-blocks (:asm code) (:labels code))
             graph (block-graph blocks code)
             stack (method-stack-size graph (:asm code) labels extab)]
-        (alter mref update-in [:attributes 0 :exception-table]
+        (alter mref update-in [:code :exception-table]
                (fn [xs]
                  (vec (map (fn [{:keys [start-pc end-pc
                                         handler-pc catch-type]}]
@@ -2433,7 +2432,9 @@
                               :handler-pc (get-or-die labels handler-pc)
                               :catch-type catch-type})
                            xs))))
-        (alter mref assoc-in [:attributes 0 :max-stack] stack)))))
+        (alter mref assoc-in [:code :max-stack] stack)
+        (add-attribute cref mref
+                       (:code @mref))))))
 
 (defn assemble-class [cref]
   (dosync

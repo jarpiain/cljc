@@ -347,7 +347,7 @@
       (asm/emit cref mref
         `([:ldc ~(int variadic-arity)]
           [:ireturn]))
-      (asm/assemble-method mref)))
+      (asm/assemble-method cref mref)))
   (doseq [{:keys [argv bind this loop-label body] :as mm} (:methods obj)]
     (let [variadic? (variadic? argv)
           mref (asm/add-method cref
@@ -361,7 +361,7 @@
       (let [body (gen body)]
         (asm/emit cref mref body))
       (asm/emit1 cref mref [:areturn])
-      (asm/assemble-method mref))))
+      (asm/assemble-method cref mref))))
 
 (defn compile-class
   "Compile and load the class representing
@@ -385,7 +385,7 @@
                                     :flags #{:public :static}})]
       (emit-constants obj c clinit)
       (asm/emit1 c clinit [:return])
-      (asm/assemble-method clinit))
+      (asm/assemble-method c clinit))
 
     ;; instance fields for closed-overs
     (doseq [[sym bind] (:closed-lexicals obj)]
@@ -412,7 +412,7 @@
                           [:putfield [~(:name obj) ~arg ~typ]]))
                       clos-names clos-types)
             [:return]))
-        (asm/assemble-method init)))
+        (asm/assemble-method c init)))
 
     (let [meta (asm/add-method c {:name 'meta
                                   :descriptor [:method IPersistentMap []]
@@ -420,7 +420,7 @@
       (asm/emit c meta
         `([:aconst-null]
           [:areturn]))
-      (asm/assemble-method meta))
+      (asm/assemble-method c meta))
 
     (let [with-meta (asm/add-method c {:name 'withMeta
                                        :descriptor
@@ -429,7 +429,7 @@
       (asm/emit c with-meta
         `([:aload-0]
           [:areturn]))
-      (asm/assemble-method with-meta))
+      (asm/assemble-method c with-meta))
 
     (emit-methods obj c)
 
@@ -485,7 +485,7 @@
                                                :flags #{:public :static}
                                                :descriptor [:method :void []]})]
                  (asm/emit ns-init clj-init loader-code)
-                 (asm/assemble-method clj-init))
+                 (asm/assemble-method ns-init clj-init))
 
                (let [[top _] (current-object context)]
                  (doseq [fld (:constants top)]
@@ -500,7 +500,7 @@
                                                    :flags #{:public :static}})]
                    (emit-constants top ns-init init-const)
                    (asm/emit1 ns-init init-const [:return])
-                   (asm/assemble-method init-const))
+                   (asm/assemble-method ns-init init-const))
 
                  (let [clinit (asm/add-method ns-init
                                         {:name '<clinit>
@@ -539,7 +539,7 @@
                        [:label ~end]
                        [:return]
                        [:catch ~start-try ~end-try ~final nil]))
-                   (asm/assemble-method clinit))
+                   (asm/assemble-method ns-init clinit))
                  (let [ns-init (asm/assemble-class ns-init)]))))))))))
 
 (defn- compile1

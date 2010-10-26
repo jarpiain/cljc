@@ -446,8 +446,7 @@
      (:code-length inf)
      (* 8 (count (:exception-table inf)))
      (* 6 (count (:attributes inf))) ; headers
-     (reduce + (map #(attribute-length (:name %) %)
-                    (:attributes inf)))))
+     (reduce + (map attribute-length (:attributes inf)))))
 
 (defmethod attribute-length "Exceptions"
   [inf]
@@ -1945,11 +1944,11 @@
         (alter mref assoc-in [:code] ncode)
         (alter cref assoc :symtab ntab)))))
 
-; (label foo)
+; (:label foo)
 (defn label? [ins]
   (= (first ins) :label))
 
-; (block start end [var type...]
+; (:block start-sym? end-sym? [sym type...]
 ;   body)
 (defn block? [ins]
   (= (first ins) :block))
@@ -1977,6 +1976,12 @@
        (emit1 cref mref (apply vector
                               'block nil nil []
                               body)))
+
+     (= (first item) :line)
+     (let [[ln pc] (rest item)]
+       (dosync
+         (alter mref update-in [:code :line-numbers]
+                conj {:line-number ln :start-pc pc})))
 
      (= (first item) :catch)
      (let [[_ beg end handler spec] item]
@@ -2438,12 +2443,12 @@
                               :catch-type catch-type})
                            xs))))
         (let [code (ref (assoc (:code @mref) :max-stack stack))]
-          (when-let [lns (seq (map (fn [{:keys [line start-pc]}]
-                                     {:line line
+          (when-let [lns (seq (map (fn [{:keys [line-number start-pc]}]
+                                     {:line-number line-number
                                       :start-pc (labels start-pc)})
                                    (:line-numbers @code)))]
             (add-attribute cref code {:name "LineNumberTable"
-                                      :table (vec lns)}))
+                                      :table (vec lns)}))          
           (add-attribute cref mref @code))))))
 
 (defn assemble-class [cref]

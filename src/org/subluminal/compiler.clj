@@ -370,7 +370,7 @@
   (asm/assembling [c {:name (:name obj)
                       :extends super
                       :implements ifaces
-                      :source-file (:source-file ctx)
+                      :source-file (or (:source-file ctx) "REPL")
                       :flags #{:public :super :final}}]
     ;; static fields for constants
     (doseq [fld (:constants obj)]

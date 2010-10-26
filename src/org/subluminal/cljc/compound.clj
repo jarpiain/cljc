@@ -56,7 +56,8 @@
           else (analyze pos typ nil else)
           _ pop-frame
           _ pop-frame]
-      (let [left (:gen-type then)
+      (let [line (:line (meta form))
+            left (:gen-type then)
             right (:gen-type else)
             gen 
             (if (= left right)
@@ -64,15 +65,18 @@
                   (common-supertype left right))]
         {::etype ::if
          :gen-type gen ; will be Void/TYPE if (= pos :statement)
+         :line line
          :tst tst
          :then then
          :else else}))))
 
 (defmethod gen ::if
-  [{:keys [gen-type tst then else]}]
+  [{:keys [gen-type line tst then else]}]
   (if (= (:gen-type tst) Boolean/TYPE)
-    (let [[elsel endl] (map gensym ["Else__" "Endif__"])]
-      `(~@(gen tst)
+    (let [[ifl elsel endl] (map gensym ["If__" "Else__" "Endif__"])]
+      `(~@(when line
+            (list [:label ifl] [:line line ifl]))
+        ~@(gen tst)
         [:ifeq ~elsel]
         ~@(gen then)
         ~@(gen-convert (:gen-type then) gen-type)
@@ -83,8 +87,11 @@
         ~@(gen else)
         ~@(gen-convert (:gen-type else) gen-type)
         [:label ~endl]))
-    (let [[falsel null endl] (map gensym ["False__" "Null__" "Endif__"])]
-      `(~@(gen tst)
+    (let [[ifl falsel null endl] (map gensym ["If__" "False__"
+                                              "Null__" "Endif__"])]
+      `(~@(when line
+            (list [:label ifl] [:line line ifl]))
+        ~@(gen tst)
         [:dup]
         [:ifnull ~null]
         [:getstatic ~[Boolean 'FALSE Boolean]]

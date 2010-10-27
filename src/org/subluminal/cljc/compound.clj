@@ -114,6 +114,73 @@
     (eval-toplevel then loader)
     (eval-toplevel else loader)))
 
+;;;; Case
+
+(defn analyze-case-branch [pos b [minh [tst then]]]
+  (run [_ (push-clear-node :path false)
+        _ (make-binding-instance b nil)
+        testc (register-constant nil tst)
+        branch (analyze pos nil nil then)
+        _ pop-frame]
+    [minh [testc branch]]))
+
+(defmethod analyze [::special 'case*]
+  [pos typ _ [_ expr shift mask low high default vmap id? :as form]]
+  (if (= pos :eval)
+    (analyze pos typ nil `((~'fn* [] ~form)))
+    (run [tst (analyze :expression nil nil expr)
+          _ (push-clear-node :branch false)
+          branches (m-map (partial analyze-case-branch pos tst)
+                          (seq vmap))
+          _ (push-clear-node :path false)
+          defbranch (analyze pos nil nil default)
+          _ pop-frame
+          _ pop-frame]
+      (let [line (:line (meta form))]
+        {::etype ::case
+         :gen-type Object
+         :line line
+         :test-expr tst
+         :shift shift
+         :mask mask
+         :low low
+         :high high
+         :default defbranch
+         :branches branches
+         :id? id?}))))
+
+(defmethod gen ::case
+  [{:keys [line test-expr shift mask low high default branches id?]}]
+  (let [deflbl (gensym "Default__")
+        endl (gensym "Endcase__")
+        branchlbls (map (fn [[minh _]] [minh (gensym "Case__")]) branches)
+        branchtab (reduce (fn [tab [minh lbl]]
+                            (assoc tab (- minh low) lbl))
+                          (vec (repeat (inc (- high low)) deflbl))
+                          branchlbls)]
+  `(~@(gen test-expr)
+    [:invokestatic ~[Util 'hash [:method :int [Object]]]]
+    [:sipush ~shift]
+    [:ishr]
+    [:ldc ~(int mask)]
+    [:iand]
+    [:tableswitch nil ~deflbl ~low ~high ~branchtab]
+    ~@(mapcat (fn [[_ lbl] [_ [tst then]]]
+                `([:label ~lbl]
+                  ~@(gen test-expr)
+                  ~@(gen tst)
+                  ~@(if id?
+                      (list [:if-acmpne deflbl])
+                      `([:invokestatic ~[Util 'equals
+                                         [:method :boolean [Object Object]]]]
+                        [:ifeq ~deflbl]))
+                  ~@(gen then)
+                  [:goto ~endl]))
+              branchlbls branches)
+    [:label ~deflbl]
+    ~@(gen default)
+    [:label ~endl])))
+
 ;;;; Do
 
 (defmethod analyze [::special 'do]

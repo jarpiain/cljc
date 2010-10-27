@@ -1891,15 +1891,15 @@
                   delta))
 
         :lookupswitch
-        (let [[_ default n & pairs] orig]
+        (let [[_ default n pairs] orig]
           (struct instruction op
-                  (apply vector nil default n pairs)
+                  (vector nil default n pairs)
                   delta))
 
         :tableswitch
-        (let [[_ default low high & tab] orig]
+        (let [[_ default low high tab] orig]
           (struct instruction op
-                  (apply vector nil default low high tab)
+                  (vector nil default low high tab)
                   delta))
 
         :wide
@@ -2264,15 +2264,15 @@
       #{nxt (jump-target labels target)}
 
       (= op :tableswitch)
-      (let [[default min max & targets] more]
-        (apply set (jump-target labels default)
-               (map (partial jump-target labels) targets)))
+      (let [[default min max targets] more]
+        (set (cons (jump-target labels default)
+                   (map (partial jump-target labels) targets))))
 
       (= op :lookupswitch)
-      (let [[default num & pairs] more]
-        (apply set (jump-target labels default)
-               (map (partial jump-target labels)
-                    (take-nth 2 (next pairs)))))
+      (let [[default num pairs] more]
+        (set (cons (jump-target labels default)
+                   (map (partial jump-target labels)
+                        (take-nth 2 (next pairs))))))
 
       :else
       #{nxt})))
@@ -2297,7 +2297,7 @@
                  (next ins) true)
 
           :lookupswitch
-          (let [[_ default count & pairs] args]
+          (let [[_ default count pairs] args]
             (recur (apply assoc blocks
                           (target-offset default pc labels) {}
                           (interleave
@@ -2307,7 +2307,7 @@
                    (next ins) true))
 
           :tableswitch
-          (let [[ _ default low high & tab] args]
+          (let [[_ default low high tab] args]
             (recur (apply assoc blocks
                           (target-offset default pc labels) {}
                           (interleave
@@ -2383,14 +2383,14 @@
         (bin/write-binary t buf a)))
     (case op
       :tableswitch
-      (let [[_ default low high & more] args]
+      (let [[_ default low high more] args]
         (doseq [targ more]
           (if (symbol? targ)
             (bin/write-binary ::bin/int32 buf (- (first (get labels targ)) pc))
             (bin/write-binary ::bin/int32 buf targ))))
 
       :lookupswitch
-      (let [[_ default npairs & more] args]
+      (let [[_ default npairs more] args]
         (doseq [[key targ] (partition 2 more)]
           (bin/write-binary ::bin/int32 buf key)
           (if (symbol? targ)

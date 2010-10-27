@@ -42,8 +42,6 @@ compiled class)
 
 Missing/broken features (partial list!)
 - deftype*, reify*, letfn*, and set! are not implemented
-- case* is translated into a sequence of ifs resulting
-  in O(n) lookup.
 - No optimization for keyword and var fn invocations
 - No metadata on fn objects
 

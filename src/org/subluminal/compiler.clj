@@ -24,7 +24,7 @@
                          PersistentList PersistentList$EmptyList
                          PersistentVector PersistentArrayMap
                          PersistentHashSet PersistentHashMap
-                         RT Var Symbol Keyword ISeq IFn))
+                         RT Util Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
         (clojure [inspector :only [inspect-tree]])
         (org.subluminal util))
@@ -221,26 +221,6 @@
                    {::etype ::set!
                     :position pos})
         (throw (IllegalArgumentException. "Invalid assignment target"))))))
-
-;; XXX just a quick hack
-(defmethod analyze [::special 'case*]
-  [pos typ _ [_ expr shift mask low high default vmap id? :as form]]
-  (let [reform (reduce (fn [part [k e]]
-                     `(if (= ~expr '~k) ~e ~part))
-                   default
-                   (vals vmap))]
-    (analyze pos typ nil reform)))
-
-  #_(fn [ctx]
-    (if (= (:position ctx) :eval)
-      (analyze `((~'fn* [] ~form)))
-      (run-with ctx
-        [pos (set-val :position :expression)
-         _ (set-val :want-unboxed nil)
-         eexpr (analyze expr)
-         _ (push-clear-node :branch false)
-         evmap (m-map analyze-entry (seq vmap))
-         _ pop-frame])))
 
 ;; Should change to defmulti
 ;; TODO serialization with print/read

@@ -11,8 +11,9 @@
 
 (ns org.subluminal.compiler
   (:refer-clojure :exclude [load load-file compile eval])
-  (:import (java.io Reader InputStreamReader)
+  (:import (java.io Reader InputStreamReader File FileOutputStream)
            (java.nio ByteBuffer)
+           (java.nio.channels FileChannel)
            (java.nio.charset Charset)
            (java.util IdentityHashMap Arrays List)
            (java.lang.reflect Field Method Constructor)
@@ -345,6 +346,18 @@
       (asm/emit1 cref mref [:areturn])
       (asm/assemble-method cref mref))))
 
+(defn write-class-file [cname buf]
+  (let [cfile (File. (str *compile-path* File/separator
+                          (.replace (str cname) "." File/separator)
+                          ".class"))
+        dir (.getParentFile cfile)]
+    (println "Writing to" (.getCanonicalPath cfile))
+    (.mkdirs dir)
+    (with-open [fos (FileOutputStream. cfile)
+                chan (.getChannel fos)]
+      (.truncate chan 0)
+      (.write chan buf))))
+
 (defn compile-class
   "Compile and load the class representing
   a fn or (not implemented yet) deftype"
@@ -421,6 +434,9 @@
       (let [arr (.array bytecode)]
         (try
           (.defineClass (:loader ctx) (str (:name obj)) arr nil)
+          (when *compile-files*
+            (.flip bytecode)
+            (write-class-file (:name obj) bytecode))
           (catch Throwable e
             (println "Caught while loading class:" (class e) e))
           (finally
@@ -444,14 +460,14 @@
 (declare compile1)
 (defn compile-file
   ([rd src-path src-name]
-   (asm/assembling [ns-init {:name (file->class-name src-path)
+   (asm/assembling [ns-init {:name (file->class-name src-path RT/LOADER_SUFFIX)
                              :flags #{:public :super}
                              :source-file src-name}]
      (let [loader (DynamicClassLoader.)]
        (run-with (assoc null-context
                         :loader loader
                         :source-file src-name)
-         [_ (push-object-frame {:name 'toplevel})
+         [_ (push-object-frame {:name (symbol (file->class-name src-path RT/LOADER_SUFFIX))})
           _ (set-val :position :eval)
           context (set-state null-context)]
          (loop [ctx context loader-code [] forms (form-seq rd)]
@@ -467,13 +483,14 @@
                                                :flags #{:public :static}
                                                :descriptor [:method :void []]})]
                  (asm/emit ns-init clj-init loader-code)
+                 (asm/emit1 ns-init clj-init [:return])
                  (asm/assemble-method ns-init clj-init))
 
-               (let [[top _] (current-object context)]
+               (let [[top _] (current-object ctx)]
                  (doseq [fld (:constants top)]
-                   (let [{:keys [val gen-type]} fld]
-                     (asm/add-field ns-init {:name val
-                                             :descriptor gen-type
+                   (let [{:keys [cfield source-type]} fld]
+                     (asm/add-field ns-init {:name cfield
+                                             :descriptor source-type
                                              :flags #{:public :final :static}})))
            ;; TODO inits in blocks of 100...
                  (let [init-const (asm/add-method ns-init
@@ -491,8 +508,10 @@
                        [start-try end-try end final]
                        (map gensym ["TRY__" "DONE__" "END__" "FIN__"])]
                    (asm/emit ns-init clinit
-                     `([:iconst-2] ; inlined Compiler/pushNS()
-                       [:anewarray [:array ~Object]]
+                     `([:invokestatic ~[(:name @ns-init) '__init0
+                                          [:method :void []]]]
+                       [:iconst-2] ; inlined Compiler/pushNS()
+                       [:anewarray ~Object]
                        [:dup]
                        [:iconst-0] ; arr arr 0
                        [:ldc "clojure.core"]
@@ -522,7 +541,12 @@
                        [:return]
                        [:catch ~start-try ~end-try ~final nil]))
                    (asm/assemble-method ns-init clinit))
-                 (let [ns-init (asm/assemble-class ns-init)]))))))))))
+                 (when *compile-files*
+                   (let [c (asm/assemble-class ns-init)
+                         bytecode (ByteBuffer/allocate (asm/class-length c))] 
+                     (bin/write-binary ::asm/ClassFile bytecode c)
+                     (.flip bytecode)
+                     (write-class-file (:name @ns-init) bytecode))))))))))))
 
 (defn- compile1
   "Compile and eval a top-level form"

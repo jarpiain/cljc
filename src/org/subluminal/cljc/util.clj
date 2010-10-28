@@ -97,11 +97,11 @@
   (and (namespace sym)
        (not (namespace-for nss sym))))
 
-(defn file->class-name [^String f]
+(defn file->class-name [^String f suffix]
   (symbol (str (-> f
                  (.replace java.io.File/separator ".")
                  (.substring 0 (.lastIndexOf f (int \.))))
-               RT/LOADER_SUFFIX)))
+               suffix)))
 
 (def +char-map+
   {\- "_"

@@ -1542,7 +1542,7 @@
       (when throws
         (let [[idx tab]
               ((with-monad state-m
-                (m-map class-to-pool
+                (s-map class-to-pool
                        (map normalize-type-specifier throws)))
                (:symtab @cref))]
           (alter cref assoc :symtab tab)
@@ -1929,7 +1929,7 @@
           norm (map normalize-arg (concat atyp (repeat ::null)) args)
           {:keys [locals]} ctx ; TODO
           arg-m (with-monad state-m
-                  (m-map (fn [[t a]]
+                  (s-map (fn [[t a]]
                            (lookup-instr-arg t a ctx))
                          (map vector atyp norm)))]
       (let [[argidx ntab] (arg-m pool)
@@ -2144,7 +2144,7 @@
              (domonad state-m
                [_   (set-val :pc 0)
                 ins (set-val :asm (sorted-map))
-                _   (m-map refine1 ins)
+                _   (s-map refine1 ins)
                 siz (fetch-val :pc)
                 _   (set-val :code-length siz)]
                nil)))))
@@ -2349,7 +2349,7 @@
                    (for [{handler :handler-pc} extab]
                      [(get labels handler) 1]))
         calc (with-monad state-m
-               (m-map #(fn [stacks]
+               (s-map #(fn [stacks]
                          (let [[out high]
                                (block-stack-size
                                  (block-code code (:neighbors block-graph) %)

@@ -50,6 +50,8 @@
         body (sat-body s form)]
     `(fn [~s] (if ~body true false))))
 
+;;;; Utils for the state monad
+
 (defmacro run-with
   [init bind & body]
   (let [gstate (gensym "STATE__") gname (gensym "run")
@@ -83,6 +85,17 @@
   [keys val]
   (fn [state]
     [nil (assoc-in state keys val)]))
+
+(defn s-map
+  "A version of m-map specialized to the state monad
+  that doesn't consume stack"
+  [f & colls]
+  (fn [ctx]
+    (loop [ms (apply map f colls) r (transient []) ctx ctx]
+      (if (seq ms)
+        (let [[v ctx] ((first ms) ctx)]
+          (recur (next ms) (conj! r v) ctx))
+        [(seq (persistent! r)) ctx]))))
 
 (def parser-m (state-t maybe-m))
 

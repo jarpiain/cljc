@@ -130,7 +130,7 @@
     (analyze pos typ nil `((~'fn* [] ~form)))
     (run [tst (analyze :expression nil nil expr)
           _ (push-clear-node :branch false)
-          branches (m-map (partial analyze-case-branch pos tst)
+          branches (s-map (partial analyze-case-branch pos tst)
                           (seq vmap))
           _ (push-clear-node :path false)
           defbranch (analyze pos nil nil default)
@@ -193,7 +193,7 @@
     (analyze pos typ nil (first body))
 
     :else
-    (run [stmts (m-map (partial analyze :statement Void/TYPE nil) (butlast body))
+    (run [stmts (s-map (partial analyze :statement Void/TYPE nil) (butlast body))
           tail (analyze pos typ nil (last body))]
       {::etype ::do
        :gen-type (:gen-type tail)
@@ -294,7 +294,7 @@
     :else
     (let [loop-label (gensym "Loop__")]
       (run [_ (push-frame) ; local bindings
-            bindings (m-map (partial analyze-init loop?)
+            bindings (s-map (partial analyze-init loop?)
                             (partition 2 bindings))
             _ (if loop?
                 (set-vals :loop-label loop-label
@@ -335,7 +335,7 @@
 
 ;;;; Recur
 
-(defn- analyze-with-type [[form typ]]
+(defn- analyze-with-type [form typ]
   (analyze :expression typ nil form))
 
 (defmethod analyze [::special 'recur]
@@ -356,8 +356,9 @@
 
       :else
       (run-with ctx
-        [inits (m-map analyze-with-type
-                      (map vector inits (map :gen-type loop-locals)))]
+        [inits (s-map analyze-with-type
+                      inits
+                      (map :gen-type loop-locals))]
         {::etype ::recur
          :gen-type nil
          :inits (doall inits)
@@ -449,7 +450,7 @@
                                     " in try expression"))))
           (recur (next remain))))
       (run [body (analyze pos typ nil `(~'do ~@body))
-            clauses (m-map (partial analyze-catch-clause
+            clauses (s-map (partial analyze-catch-clause
                                     pos (:gen-type body))
                            clauses)]
         (let [final (last clauses)
@@ -514,7 +515,7 @@
           res (if-not (identical? me form)
                 (analyze pos typ name me)
                 (run [op (analyze :expression nil nil op)
-                      args (m-map (partial analyze :expression true nil) args)]
+                      args (s-map (partial analyze :expression true nil) args)]
                   {::etype ::invocation
                    :line line
                    :op op
@@ -671,7 +672,7 @@
                 (and (seq? member) (seq args)))
         (throw (Exception. "Malformed member expression")))
       (run [inst (if c (m-result nil) (analyze :expression nil nil target))
-            argl (m-map (partial analyze :expression true nil) argl)]           
+            argl (s-map (partial analyze :expression true nil) argl)]           
         (let [field? (when (and field? (not (keyword? memb)))
                        (if c
                          (empty? (Reflector/getMethods
@@ -796,7 +797,7 @@
       (if-not c
         (throw (IllegalArgumentException.
                  (str "Unable to resolve classname: " cls)))
-        (run [args (m-map (partial analyze :expression true nil) ctor-args)]
+        (run [args (s-map (partial analyze :expression true nil) ctor-args)]
           (let [ctors (filter (fn [^Constructor ctor]
                                 (== (count (.getParameterTypes ctor))
                                     (count args)))
@@ -850,7 +851,7 @@
 
 (defmethod analyze ::vector
   [pos typ _ vect]
-  (run [comps (m-map (partial analyze :expression nil nil) vect)
+  (run [comps (s-map (partial analyze :expression nil nil) vect)
         res (if (every? #(isa? (::etype %) ::constant) comps)
               (register-constant typ (vec (map :lit-val comps)))
               (m-result {::etype ::vector
@@ -863,7 +864,7 @@
 
 (defmethod analyze ::set
   [pos typ _ elts]
-  (run [elts (m-map (partial analyze :expression nil nil) elts)
+  (run [elts (s-map (partial analyze :expression nil nil) elts)
         res (if (every? #(isa? (::etype %) ::constant) elts)
               (register-constant typ (set (map :lit-val elts)))
               (m-result {::etype ::set
@@ -875,7 +876,7 @@
 
 (defmethod analyze ::map
   [pos typ _ entries]
-  (run [entries (m-map (partial analyze :expression nil nil)
+  (run [entries (s-map (partial analyze :expression nil nil)
                        (apply concat (seq entries)))
         res (if (every? #(isa? (::etype %) ::constant) entries)
               (register-constant typ (apply array-map (map :lit-val entries)))

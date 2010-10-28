@@ -351,7 +351,6 @@
                           (.replace (str cname) "." File/separator)
                           ".class"))
         dir (.getParentFile cfile)]
-    (println "Writing to" (.getCanonicalPath cfile))
     (.mkdirs dir)
     (with-open [fos (FileOutputStream. cfile)
                 chan (.getChannel fos)]
@@ -553,7 +552,7 @@
   [form]
   (run [form (macroexpand-impl *ns* form)
         res (if (and (seq? form) (= (first form) 'do))
-              (m-map compile1 (next form))
+              (s-map compile1 (next form))
               (run [analyzed (analyze :eval nil nil form)
                     loader (fetch-val :loader)]
                 (let [bytecode (gen analyzed)]

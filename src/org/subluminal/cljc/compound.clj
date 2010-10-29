@@ -64,7 +64,7 @@
                   left
                   (common-supertype left right))]
         {::etype ::if
-         :gen-type gen ; will be Void/TYPE if (= pos :statement)
+         :gen-type gen
          :line line
          :tst tst
          :then then
@@ -306,7 +306,7 @@
             _ (if loop? pop-frame (m-result nil))
             _ pop-frame] ; local bindings
         {::etype ::loop
-         :gen-type (if (= typ Void/TYPE) typ (:gen-type body))
+         :gen-type (:gen-type body)
          :bindings bindings
          :loop-label loop-label
          :body body}))))

@@ -41,13 +41,12 @@
   "Parse a form into an AST of nested maps. The resulting map
   will have at least the ::etype and :gen-type keys
 
-  Position should be one of :expression, :statement, :return,
-  or :eval. The :gen-type of a form analyzed in :statement
-  position will always be void.
-  
-  If a primitive result is permitted, the type request argument
-  should be set to true or a specific primitive Class object.
-  The analyzed form need no have the requested :gen-type.
+  Position should be one of :expression, :statement, :return, or :eval.
+
+  The type request argument should be set to void if the value
+  will be discarded. If a primitive result is permitted, type-req
+  should be set to true or a specific primitive Class object but
+  the analyzed form need not have the requested primitive :gen-type.
   If type-req is nil, a boxed result is always generated.
   In any case the analyze-contract predicate is satisfied
   between the requested and actual type.

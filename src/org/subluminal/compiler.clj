@@ -266,7 +266,7 @@
          [:ldc (namespace c)]
          [:aconst-null])
       [:ldc ~(name c)]
-      [:invokestatic ~[Symbol 'create [:method Symbol [String String]]]])
+      [:invokestatic ~[Symbol 'intern [:method Symbol [String String]]]])
 
     (keyword? c)
     `(~(if (namespace c)
@@ -510,10 +510,10 @@
                        [:dup]
                        [:iconst-0] ; arr arr 0
                        [:ldc "clojure.core"]
-                       [:invokestatic ~[Symbol 'create
+                       [:invokestatic ~[Symbol 'intern
                                         [:method Symbol [String]]]]
                        [:ldc "*ns*"]
-                       [:invokestatic ~[Symbol 'create
+                       [:invokestatic ~[Symbol 'intern
                                         [:method Symbol [String]]]]
                        [:invokestatic ~[Var 'intern
                                         [:method Var [Symbol Symbol]]]]

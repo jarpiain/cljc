@@ -31,10 +31,6 @@
         (org.subluminal util))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
-(def gen nil)
-(def analyze nil)
-(def eval-toplevel nil)
-
 (declare syncat)
 
 (defmulti analyze
@@ -181,7 +177,8 @@
 
 (def
   ^{:doc "If true, the compiler will open each compiled class
-         file into a tree inspector"}
+         file into a tree inspector"
+    :dynamic true}
   *debug-inspect* false)
 
 (defn analyze-fragment "Test analysis"

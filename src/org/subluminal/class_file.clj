@@ -1268,7 +1268,7 @@
        name
        (normalize-method-descriptor desc)])))
 
-(def *assembling* {})
+(def ^{:dynamic true} *assembling* {})
 
 (def empty-symtab {:pool [nil]
                    :classes {}

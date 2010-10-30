@@ -21,16 +21,16 @@
   (keyword (-> *ns* ns-name name)
            (-> sym name)))
 
-(def *known-types* (atom {}))
+(def known-types (atom {}))
 
 (defn lookup [tag]
-  (swap! *known-types*
+  (swap! known-types
          (fn [ts]
            (if (contains? ts tag)
              ts
              (assoc ts tag {:reader (Var/create)
                             :writer (Var/create)}))))
-  (get @*known-types* tag))
+  (get @known-types tag))
 
 (defn bind-tag! [tag rd wr]
   (let [{^Var rd-var :reader ^Var wr-var :writer} (lookup tag)]
@@ -39,12 +39,12 @@
 
 ;; target must exist
 (defn alias-tag! [target alias]
-  (swap! *known-types*
+  (swap! known-types
          (fn [ts]
            (assoc ts alias (ts target)))))
 
 (defn redef-tag! [tag val]
-  (swap! *known-types* assoc tag val))
+  (swap! known-types assoc tag val))
 
 (defn lookup-reader [tag]
   (get (lookup tag) :reader))

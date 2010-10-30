@@ -213,12 +213,12 @@
 ;; but just delegates to clojure.lang.Compiler
 
 (def +specials+
-  #{'if 'let* 'loop* 'fn* 'recur 'quote
+  #{'if 'case* 'let* 'loop* 'fn* 'recur 'quote
     'var 'def 'monitor-enter 'monitor-exit
-    'throw 'try 'catch 'finally 'new '.
+    'throw 'try 'catch 'finally 'new '. '&
     'clojure.core/import*
     ;; TODO:
-    'case* 'letfn* 'set! 'deftype* 'reify* '&})
+    'letfn* 'set! 'deftype* 'reify*})
 
 (defn macroexpand1-impl
   [nss env form]
@@ -267,7 +267,7 @@
 
                 :else form))))))))
 
-(def *macroexpand-limit* 100)
+(def macroexpand-limit 100)
 
 (defn macroexpand-impl
   [nss form]
@@ -276,7 +276,7 @@
       (let [fx (macroexpand1-impl nss env f)]
         (if (identical? f fx)
           f
-          (if (and *macroexpand-limit* (>= n *macroexpand-limit*))
+          (if (and macroexpand-limit (>= n macroexpand-limit))
             (throw (Exception. (str "Runaway macroexpansion: " form)))
             (recur fx (inc n))))))))
 

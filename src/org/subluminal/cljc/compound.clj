@@ -507,6 +507,17 @@
 
 ;;;; Fn invocation
 
+(defn- inline-op
+  [op form]
+  (when (= (::etype op) ::var)
+    (let [op (:lit-val op)
+          inl (:inline (meta op))
+          arities (:inline-arities (meta op))]
+      (when (and inl
+                 (or (nil? arities)
+                     (arities (count (rest form)))))
+        inl))))
+
 (defmethod analyze ::invocation
   [pos typ name [op & args :as form]]
   (let [tag (tag-class *ns* (tag-of form))
@@ -514,19 +525,24 @@
     (run [me (macroexpand-impl *ns* form)
           res (if-not (identical? me form)
                 (analyze pos typ name me)
-                (run [op (analyze :expression nil nil op)
-                      args (s-map (partial analyze :expression true nil) args)]
-                  {::etype ::invocation
-                   :line line
-                   :op op
-                   :args (doall args)
-                   :gen-type (cond
-                               (= typ Void/TYPE)
-                               Void/TYPE
-                               (and tag (analyze-contract typ tag)
-                                    (gen-contract Object tag))
-                               tag
-                               :else Object)}))]
+                (fn [ctx]
+                  (let [[op ctx] ((analyze :expression nil nil op) ctx)]
+                    (if-let [inl (inline-op op form)]
+                      ((analyze pos typ nil (apply inl args)) ctx)
+                      (run-with ctx
+                        [args (s-map (partial analyze :expression true nil)
+                                     args)]
+                        {::etype ::invocation
+                         :line line
+                         :op op
+                         :args (doall args)
+                         :gen-type (cond
+                                     (= typ Void/TYPE)
+                                     Void/TYPE
+                                     (and tag (analyze-contract typ tag)
+                                          (gen-contract Object tag))
+                                     tag
+                                     :else Object)})))))]
       res)))
 
 (defmethod gen ::invocation

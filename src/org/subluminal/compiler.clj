@@ -10,7 +10,7 @@
 ;; of clojure-1.3.0-alpha1
 
 (ns org.subluminal.compiler
-  (:refer-clojure :exclude [load load-file compile eval])
+  (:refer-clojure :exclude [load load-file compile eval require])
   (:import (java.io Reader InputStreamReader File FileOutputStream)
            (java.nio ByteBuffer)
            (java.nio.channels FileChannel)
@@ -562,19 +562,28 @@
            (replace \- \_)
            (replace \. \/))))
 
-(defn compile
-  "Compile and load a lib and write generated class files to *compile-path*"
-  [lib]
+(defn load-lib
+  [lib write-files?]
   (let [root (root-resource lib)
         cljfile (.substring (str root ".clj") 1)
         loader (RT/baseLoader)]
     (with-open [ins (.getResourceAsStream loader cljfile)
                 inrd (InputStreamReader. ins (Charset/forName "UTF-8"))]
       (binding [*ns* *ns*
-                *compile-files* true]
+                *compile-files* write-files?]
         (compile-file inrd cljfile
           (.substring cljfile (inc (.lastIndexOf cljfile "/")))))))
   nil)
+
+(defn compile
+  "Compile and load a lib and write generated class files to *compile-path*"
+  [lib]
+  (load-lib lib true))
+
+(defn require
+  "Compile and load a lib"
+  [lib]
+  (load-lib lib false))
 
 (defn load-file
   "A simple version to demonstrate bootstrapping"

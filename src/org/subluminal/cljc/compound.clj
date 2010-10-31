@@ -340,13 +340,10 @@
 
 (defmethod analyze [::special 'recur]
   [pos typ _ [_ & inits :as form]]
-  (fn [{:keys [loop-locals loop-label catching] :as ctx}]
+  (fn [{:keys [loop-locals loop-label] :as ctx}]
     (cond
       (or (not= pos :return) (nil? loop-label))
       (throw (Exception. "Can only recur from tail position"))
-
-      catching
-      (throw (Exception. "Cannot recur from catch/finally"))
 
       (not (== (count inits) (count loop-locals)))
       (throw (Exception.
@@ -419,8 +416,8 @@
         :else
         (run [_ (push-frame)
               lb (make-binding evar eclass eclass :local nil)
-              _ (set-val :catching true)
-              body (analyze pos typ nil `(~'do ~@body))
+              body (analyze (if (= pos :return) :expression pos)
+                            typ nil `(~'do ~@body))
               _ pop-frame]
           {::etype ::catch
            :gen-type (:gen-type body)
@@ -428,7 +425,6 @@
            :body body})))
     'finally
     (run [_ (push-frame)
-          _ (set-val :catching true)
           body (analyze :statement Void/TYPE nil `(~'do ~@args))
           _ pop-frame]
       {::etype ::finally
@@ -449,7 +445,8 @@
             (throw (Exception. (str "Finally clause must be last"
                                     " in try expression"))))
           (recur (next remain))))
-      (run [body (analyze pos typ nil `(~'do ~@body))
+      (run [body (analyze (if (= pos :return) :expression pos)
+                          typ nil `(~'do ~@body))
             clauses (s-map (partial analyze-catch-clause
                                     pos (:gen-type body))
                            clauses)]

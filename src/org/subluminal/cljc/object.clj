@@ -12,6 +12,32 @@
 
 (declare compile-class)
 
+(defn emit-methods [{:keys [variadic-arity] :as obj} cref]
+  (when variadic-arity
+    (let [mref (asm/add-method cref
+                 {:name 'getRequiredArity
+                  :descriptor [:method :int []]
+                  :flags #{:public}})]
+      (asm/emit cref mref
+        `([:sipush ~(int variadic-arity)]
+          [:ireturn]))
+      (asm/assemble-method cref mref)))
+  (doseq [{:keys [name rtype line bind loop-label body] :as mm}
+          (:methods obj)]
+    (let [mref (asm/add-method cref
+                   {:name name
+                    :descriptor [:method rtype (map :source-type bind)]
+                    :params (map :label bind)
+                    :flags #{:public}
+                    :throws [Exception]})]
+      (asm/emit1 cref mref [:label loop-label])
+      (when line
+        (asm/emit1 cref mref [:line line loop-label]))
+      (let [body (gen body)]
+        (asm/emit cref mref body))
+      (asm/emit1 cref mref [(return-op rtype)])
+      (asm/assemble-method cref mref))))
+
 (defn push-object-frame [f]
   (let [tag (gensym "OBJ__")
         f (assoc f
@@ -154,7 +180,6 @@
                                   :loop-locals nil})
             thisb (make-this-binding
                     (or this-name (gensym "THIS")) IFn)
-            ;; FIXME: rest arg should have ISeq source type
             bind (m-map (fn [[sym tag]] (make-binding sym Object tag
                                                       :fnarg nil))
                         (if (variadic? argv)
@@ -167,6 +192,8 @@
             m current-method
             _ pop-frame]
         (assoc m
+               :name (if (variadic? argv) 'doInvoke 'invoke)
+               :rtype Object
                :line line
                :body body
                :argv argv

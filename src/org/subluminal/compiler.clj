@@ -314,34 +314,6 @@
       `(~@(gen-constant lit-val)
         [:putstatic [~obj ~cfield ~source-type]]))))
 
-;; TODO: defmulti --> deftypes also
-(defn emit-methods [{:keys [variadic-arity] :as obj} cref]
-  (when variadic-arity
-    (let [mref (asm/add-method cref
-                 {:name 'getRequiredArity
-                  :descriptor [:method :int []]
-                  :flags #{:public}})]
-      (asm/emit cref mref
-        `([:sipush ~(int variadic-arity)]
-          [:ireturn]))
-      (asm/assemble-method cref mref)))
-  (doseq [{:keys [argv line bind this loop-label body] :as mm} (:methods obj)]
-    (let [variadic? (variadic? argv)
-          mref (asm/add-method cref
-                   {:name (if variadic? 'doInvoke 'invoke)
-                    :descriptor [:method Object
-                                 (repeat (count bind) Object)]
-                    :params (map :label bind)
-                    :flags #{:public}
-                    :throws [Exception]})]
-      (asm/emit1 cref mref [:label loop-label])
-      (when line
-        (asm/emit1 cref mref [:line line loop-label]))
-      (let [body (gen body)]
-        (asm/emit cref mref body))
-      (asm/emit1 cref mref [:areturn])
-      (asm/assemble-method cref mref))))
-
 (defn write-class-file [cname buf]
   (let [cfile (File. (str *compile-path* File/separator
                           (.replace (str cname) "." File/separator)

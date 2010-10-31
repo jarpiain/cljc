@@ -54,6 +54,21 @@
     :dstore
     :else :astore))
 
+(defn return-op [^Class c]
+  (cond
+    (= c Void/TYPE)
+    :return
+    (or (= c Byte/TYPE) (= c Boolean/TYPE) (= c Character/TYPE)
+        (= c Short/TYPE) (= c Integer/TYPE))
+    :ireturn
+    (= c Float/TYPE)
+    :freturn
+    (= c Long/TYPE)
+    :lreturn
+    (= c Double/TYPE)
+    :dreturn
+    :else :areturn))
+
 (defn promoted-type [^Class c]
   {:pre [(prim-type? c)]}
   (cond

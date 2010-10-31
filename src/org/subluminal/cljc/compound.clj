@@ -825,7 +825,7 @@
                   (empty? (next ctors))
                   (first ctors)
                   :else
-                  (matching-constructor (map :gen-type args) ctors))
+                  (matching-method (map :gen-type args) ctors))
                 gen-type (member-type c typ tag)]
             {::etype ::new
              :line line

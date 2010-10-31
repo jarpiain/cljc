@@ -28,7 +28,7 @@
                          RT Util Var Symbol Keyword ISeq IFn))
   (:use (clojure.contrib monads)
         (clojure [inspector :only [inspect-tree]])
-        (org.subluminal util))
+        (org.subluminal util reflect))
   (:require (org.subluminal [class-file :as asm] [binfmt :as bin])))
 
 (declare syncat)
